@@ -1,0 +1,9 @@
+node_modules
+dist
+build
+.git
+.github
+*.log
+.DS_Store
+# data folder of source runs (certificates incl. private keys)
+opcua-simulator-data

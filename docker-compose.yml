@@ -1,0 +1,38 @@
+# Headless simulator: `docker compose up -d`
+# Set OPCUA_HOSTNAME to the IP / DNS name clients use to reach this Docker host,
+# e.g. `OPCUA_HOSTNAME=192.168.1.20 docker compose up -d`. Another port: `OPCUA_PORT=4841 docker compose up -d`
+# (the same port is published on the host, so the advertised endpoint URLs stay reachable).
+# Upgrading from an older image that ran as root: give the data volume to the "node" user once with
+#   docker compose run --rm --user root --entrypoint chown opcua-simulator -R node:0 /data
+services:
+  opcua-simulator:
+    build: .
+    image: opcua-simulator
+    # fixed name: it ends up in the server certificate and the endpoint URLs
+    hostname: opcua-simulator
+    ports:
+      - "${OPCUA_PORT:-4840}:${OPCUA_PORT:-4840}"
+    environment:
+      OPCUA_PORT: ${OPCUA_PORT:-4840}
+      # empty = not set: the simulator then prints a warning with what to set
+      OPCUA_HOSTNAME: ${OPCUA_HOSTNAME:-}
+      # extra endpoint for clients on the Docker host itself (opc.tcp://localhost:<port>)
+      OPCUA_ALT_HOSTNAMES: ${OPCUA_ALT_HOSTNAMES:-localhost}
+      OPCUA_TEMPLATE: ${OPCUA_TEMPLATE:-demo}
+      # URL(s) clients really use when the published port differs or the host sits behind NAT, comma separated:
+      # OPCUA_ADVERTISED_URL: opc.tcp://192.168.1.20:4840
+      # OPCUA_PROJECT: /projects/myplant.opcuasim   # project saved from the desktop app
+      # OPCUA_NO_SECURITY: "1"
+    volumes:
+      - opcua-data:/data
+      - ./projects:/projects:ro
+    restart: unless-stopped
+    # keep Docker's own copy of the console log bounded (default json-file logs grow forever)
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+volumes:
+  opcua-data:

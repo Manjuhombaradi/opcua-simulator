@@ -1,0 +1,22 @@
+OPC UA Simulator - first start on macOS
+=======================================
+
+1. Drag "OPC UA Simulator" onto the Applications folder.
+
+2. Open it from Applications. This build is not notarized by Apple, so macOS
+   blocks the first start ("OPC UA Simulator" Not Opened / cannot be verified).
+   Click "Done" (not "Move to Trash"), then:
+
+   - open System Settings > Privacy & Security,
+   - scroll down to the message about "OPC UA Simulator" and click "Open Anyway",
+   - confirm with "Open Anyway" and your password.
+
+   On macOS 14 and older you can also Control-click the app > Open > Open.
+
+   Alternative (Terminal, one command):
+       xattr -dr com.apple.quarantine "/Applications/OPC UA Simulator.app"
+
+macOS asks only once. After that the app starts with a normal double-click.
+
+Headless mode (no window, e.g. over SSH):
+    "/Applications/OPC UA Simulator.app/Contents/MacOS/OPC UA Simulator" --headless --help

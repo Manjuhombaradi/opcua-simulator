@@ -1,0 +1,62 @@
+<!doctype html>
+<html lang="en">
+<head>
+    <meta charset="utf-8">
+    <meta http-equiv="Content-Security-Policy" content="default-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:;">
+    <title>OPC UA Simulator</title>
+    <link rel="stylesheet" href="styles.css">
+</head>
+<body>
+<div id="app">
+    <aside id="sidebar">
+        <div class="brand">
+            <div class="brand-logo">UA</div>
+            <div>
+                <div class="brand-title">OPC UA Simulator</div>
+                <div class="brand-sub" id="project-name">Demo Plant</div>
+            </div>
+        </div>
+        <nav id="nav"></nav>
+        <div class="sidebar-footer">
+            <button class="btn ghost small" id="theme-toggle" title="Toggle theme">◐ Theme</button>
+            <span class="muted small" id="app-version"></span>
+        </div>
+    </aside>
+    <main id="main">
+        <header id="topbar">
+            <div class="topbar-left">
+                <h1 id="view-title">Dashboard</h1>
+                <span id="dirty-flag" class="badge warn hidden" title="Project has unsaved changes">unsaved</span>
+            </div>
+            <div class="topbar-right">
+                <div id="server-pill" class="pill stopped"><span class="dot"></span><span id="server-pill-text">Server stopped</span></div>
+                <button class="btn primary" id="btn-start" title="Start the OPC UA server (Ctrl/Cmd+R)">▶ Start Server</button>
+                <button class="btn hidden" id="btn-restart" title="Restart to apply configuration changes">↻ Restart</button>
+                <button class="btn danger hidden" id="btn-stop" title="Stop the OPC UA server">■ Stop</button>
+                <span class="topbar-sep"></span>
+                <button class="btn" id="btn-new" title="New project from a template (Ctrl/Cmd+N)">New</button>
+                <button class="btn" id="btn-open" title="Open a project file (Ctrl/Cmd+O)">Open…</button>
+                <button class="btn" id="btn-save" title="Save project (Ctrl/Cmd+S)">Save</button>
+            </div>
+        </header>
+        <section id="view"></section>
+    </main>
+</div>
+<div id="toasts"></div>
+<div id="modal-root"></div>
+
+<script src="js/util.js"></script>
+<script src="js/chart.js"></script>
+<script src="js/views/dashboard.js"></script>
+<script src="js/views/config.js"></script>
+<script src="js/views/designer.js"></script>
+<script src="js/views/live.js"></script>
+<script src="js/views/alarms.js"></script>
+<script src="js/views/client.js"></script>
+<script src="js/views/certs.js"></script>
+<script src="js/views/logs.js"></script>
+<script src="js/views/help.js"></script>
+<script src="js/views/welcome.js"></script>
+<script src="js/app.js"></script>
+</body>
+</html>
