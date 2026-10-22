@@ -175,5 +175,12 @@
     "name": "OPC UA Simulator",
     "email": "noreply@opcua-simulator.local"
   },
-  "homepage": "https://reference.opcfoundation.org/"
+  "homepage": "https://github.com/Manjuhombaradi/opcua-simulator",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/Manjuhombaradi/opcua-simulator.git"
+  },
+  "bugs": {
+    "url": "https://github.com/Manjuhombaradi/opcua-simulator/issues"
+  }
 }

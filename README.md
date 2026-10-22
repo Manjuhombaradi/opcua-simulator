@@ -5,6 +5,8 @@ application (SCADA, MES, historian, gateway, edge agent and so on) against a ser
 timestamps, alarms and security you control. It runs on Windows, macOS and Linux, with or without a
 desktop, and in Docker.
 
+**Download:** [latest release](https://github.com/Manjuhombaradi/opcua-simulator/releases/latest) (Windows, macOS, Linux installers) · [source](https://github.com/Manjuhombaradi/opcua-simulator)
+
 ---
 
 ## 1. Download and start
