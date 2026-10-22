@@ -59,7 +59,10 @@ const Config = {
                     field("Software version", text("softwareVersion")))));
 
             const endpointLine = h("div", { class: "muted small" });
-            refreshEndpoint = () => { endpointLine.textContent = `Endpoint: opc.tcp://${cfg.hostname || "<hostname>"}:${cfg.port}${cfg.resourcePath || ""}`; };
+            refreshEndpoint = () => {
+                const host = cfg.listenAddress === "localhost" ? "localhost" : cfg.hostname || "<hostname>";
+                endpointLine.textContent = `Endpoint: opc.tcp://${host}:${cfg.port}${cfg.resourcePath || ""}`;
+            };
             refreshEndpoint();
             root.appendChild(card("Endpoint", null,
                 h("div", { class: "form-grid" },
@@ -69,11 +72,20 @@ const Config = {
                 endpointLine));
 
             const portState = h("span", { class: "port-state" });
+            const listen = select([
+                { value: "all", label: "All network interfaces — other machines can connect" },
+                { value: "localhost", label: "This computer only (localhost)" }
+            ], cfg.listenAddress === "localhost" ? "localhost" : "all");
+            listen.addEventListener("change", () => { cfg.listenAddress = listen.value; changed(); render(); });
+            const localOnly = cfg.listenAddress === "localhost";
             const autoStart = checkbox("Start the server automatically when the application opens", !!App.settings.autoStartServer,
                 (v) => App.updateSettings({ autoStartServer: v }).then(() => toast(v ? "Server will start automatically on launch" : "Auto-start disabled", "success", 1800)));
             const net = App.meta.network || { addresses: [] };
             root.appendChild(card("Startup & Network", "How the simulator starts and how other machines reach it",
                 autoStart,
+                h("div", { class: "form-grid two" }, field("Listen on", listen, localOnly
+                    ? "Only programs on this computer can connect (opc.tcp://localhost). Endpoint URLs use localhost; the IP and host name settings below are not used."
+                    : "The server accepts connections on every network interface: anyone who can reach the port can connect. Use “This computer only” when only local programs need it.")),
                 h("div", { class: "row wrap" },
                     h("button", { class: "btn small", onclick: async () => {
                         const r = await api.app("checkPort", cfg.port, App.reservedPorts(cfg));
@@ -90,35 +102,80 @@ const Config = {
                     "Comma separated opc.tcp:// URLs. Use when clients reach the server through a different host or port than it listens on (port forwarding, docker run -p 14840:4840); these URLs are returned in GetEndpoints."),
                 h("div", { class: "hint" }, "After changing host names, regenerate the server certificate (Certificates) so it matches the new names.")));
 
+            const secure = matchesSecurePreset(cfg);
             root.appendChild(card("Security", "Message security of the secure channel",
+                h("div", { class: `notice ${secure ? "good" : ""}` },
+                    h("div", { class: "row wrap" },
+                        h("div", { style: { flex: 1, minWidth: "260px" } },
+                            h("b", null, secure ? "The secure preset for organisations is active." : "Secure preset for organisations"),
+                            h("div", { class: "small" }, secure
+                                ? "Encrypted endpoints only, no anonymous login, unknown client certificates are rejected, discovery is off."
+                                : "One click to settings suitable outside a test lab: encrypted endpoints only, no anonymous login, unknown client certificates rejected, no discovery.")),
+                        secure ? null : h("button", { class: "btn primary small", onclick: () => this.applySecure(changed, render) }, "Apply secure settings…"))),
                 h("div", null, h("div", { class: "section-title" }, "Security policies"),
                     h("div", { class: "checks" }, App.meta.securityPolicies.map((p) =>
                         listToggle("securityPolicies", p, ["Basic128Rsa15", "Basic256"].includes(p) ? `${p} (deprecated)` : p)))),
                 h("div", null, h("div", { class: "section-title" }, "Message security modes"),
                     h("div", { class: "checks" }, App.meta.securityModes.map((m) => listToggle("securityModes", m)))),
                 h("div", { class: "hint" }, "An endpoint is created for each combination of policy and mode. Policy None only pairs with mode None."),
-                flag("autoAcceptCertificates", "Automatically trust unknown client certificates (convenient for testing; disable to test certificate rejection)")));
+                flag("autoAcceptCertificates", "Automatically trust unknown client application certificates (convenient for testing; disable to test certificate rejection)"),
+                h("div", { class: "hint" }, cfg.autoAcceptCertificates
+                    ? "Any client can then open a signed / encrypted connection without you trusting it first. X509 user certificates (log-in) are never trusted automatically."
+                    : "Unknown client certificates are refused and listed in Certificates → Server application PKI → Rejected, where you can trust them. X509 user certificates are never trusted automatically.")));
 
             const usersBody = h("tbody");
             (cfg.users || []).forEach((u, i) => {
                 const name = h("input", { value: u.username });
-                const pw = h("input", { value: u.password, type: "text" });
-                name.addEventListener("input", () => { u.username = name.value; changed(); });
-                pw.addEventListener("input", () => { u.password = pw.value; changed(); });
+                name.addEventListener("input", () => { u.username = name.value; changed(); refreshDemoHint(); });
+                const pw = passwordInput(u.password, (v) => { u.password = v; changed(); refreshDemoHint(); });
                 const role = select(App.meta.roles, u.role);
                 role.addEventListener("change", () => { u.role = role.value; changed(); });
                 usersBody.appendChild(h("tr", null, h("td", null, name), h("td", null, pw), h("td", null, role),
                     h("td", { class: "actions" }, h("button", { class: "btn small", onclick: () => { cfg.users.splice(i, 1); changed(); render(); } }, "Remove"))));
             });
+            // the well-known demo log-ins (admin/admin, ...) are fine in a lab, not on a reachable network
+            const demoHint = h("div", { class: "notice warn" });
+            const refreshDemoHint = () => {
+                const demo = (cfg.users || []).filter(isDemoLogin);
+                clear(demoHint);
+                demoHint.classList.toggle("hidden", !cfg.allowUsername || !demo.length);
+                if (!demo.length) return;
+                demoHint.appendChild(h("div", { class: "row wrap" },
+                    h("div", { style: { flex: 1, minWidth: "260px" } },
+                        `${demo.map((u) => `${u.username}/${u.password}`).join(", ")}: demo log-in${demo.length > 1 ? "s" : ""} that everybody knows. Fine for a test lab — change the password${demo.length > 1 ? "s" : ""} before other machines can reach this server.`),
+                    h("button", { class: "btn small", onclick: () => {
+                        for (const u of cfg.users || []) if (isDemoLogin(u)) u.password = randomPassword();
+                        changed();
+                        render();
+                        toast("Random passwords set. Use the eye button to see them; clients need the new passwords.", "success", 6000);
+                    } }, "Set random passwords")));
+            };
+            refreshDemoHint();
+            const anonAccess = select([
+                { value: "readwrite", label: "Read, write and call methods" },
+                { value: "readonly", label: "Only read" }
+            ], cfg.anonymousAccess === "readonly" ? "readonly" : "readwrite");
+            anonAccess.addEventListener("change", () => { cfg.anonymousAccess = anonAccess.value; changed(); });
             root.appendChild(card("User Authentication", "UserIdentityTokens offered by every endpoint",
                 h("div", { class: "checks" },
                     flag("allowAnonymous", "Anonymous"),
                     flag("allowUsername", "Username / password"),
                     flag("allowCertificate", "X509 certificate")),
+                cfg.allowAnonymous ? h("div", { class: "form-grid" },
+                    field("Anonymous users can", anonAccess, "Clients that connect without logging in.")) : null,
                 cfg.allowUsername ? h("div", null,
                     h("table", null, h("thead", null, h("tr", null, h("th", null, "Username"), h("th", null, "Password"), h("th", null, "Role"), h("th", null, ""))), usersBody),
-                    h("button", { class: "btn small", style: { marginTop: "8px" }, onclick: () => { cfg.users = cfg.users || []; cfg.users.push({ username: `user${cfg.users.length + 1}`, password: "password", role: "Operator" }); changed(); render(); } }, "+ Add user")) : null,
-                cfg.allowCertificate ? h("div", { class: "hint" }, "X509 user certificates are validated against the User PKI (see Certificates).") : null));
+                    h("button", { class: "btn small", style: { marginTop: "8px" }, onclick: () => {
+                        cfg.users = cfg.users || [];
+                        cfg.users.push({ username: `user${cfg.users.length + 1}`, password: randomPassword(), role: "Operator" });
+                        changed();
+                        render();
+                        toast("New user with a random password — use the eye button to see it, or type your own.", "info", 5000);
+                    } }, "+ Add user")) : null,
+                cfg.allowUsername ? demoHint : null,
+                h("div", { class: "hint" }, "Roles: Observer can only read. Operator, Engineer, Supervisor, ConfigureAdmin and SecurityAdmin can read, write values and call methods. ",
+                    "X509 users without a role can read and write values."),
+                cfg.allowCertificate ? h("div", { class: "hint" }, "X509 user certificates are checked against the User PKI and are never trusted automatically: a refused certificate appears in Certificates → User certificates → Rejected, where you can trust it.") : null));
 
             root.appendChild(card("Limits & Capabilities", null,
                 h("div", { class: "form-grid" },
@@ -148,11 +205,27 @@ const Config = {
 
             root.appendChild(card("Discovery", null,
                 flag("registerToLds", "Register this server with a Local Discovery Server (RegisterServer2)"),
-                cfg.registerToLds ? field("LDS endpoint URL", text("ldsUrl", { class: "mono" })) : null,
+                cfg.registerToLds ? field("LDS endpoint URL", text("ldsUrl", { class: "mono" }),
+                    "On start the server connects to this URL and sends its description (application URI, host names and IP addresses).") : null,
                 flag("runDiscoveryServer", "Run a built-in Local Discovery Server"),
-                cfg.runDiscoveryServer ? field("Discovery server port", text("discoveryServerPort", { type: "number" }), "Must differ from the server port; standard LDS port is 4840") : null));
+                cfg.runDiscoveryServer ? field("Discovery server port", text("discoveryServerPort", { type: "number" }),
+                    "Must differ from the server port; standard LDS port is 4840. Registered servers are announced on the local network (multicast DNS).") : null));
         };
         render();
         return App.on("project-changed", render);
+    },
+
+    async applySecure(changed, render) {
+        const ok = await confirmDialog("Apply secure settings",
+            h("div", { class: "stack", style: { gap: "10px" } },
+                h("div", null, "These settings are changed:"),
+                h("ul", { style: { margin: 0, paddingLeft: "20px" } }, SECURE_PRESET_TEXT.map((t) => h("li", null, t))),
+                h("div", { class: "muted small" }, "Clients that used SecurityPolicy None or anonymous login must then use an encrypted endpoint and log in. Also consider “Listen on: This computer only” and changing demo passwords. Applied on the next server (re)start.")),
+            "Apply secure settings");
+        if (!ok) return;
+        applySecurePreset(App.project.server);
+        changed();
+        render();
+        toast("Secure settings applied — restart the server to use them", "success");
     }
 };

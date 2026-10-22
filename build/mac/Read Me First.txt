@@ -3,7 +3,15 @@ OPC UA Simulator - first start on macOS
 
 1. Drag "OPC UA Simulator" onto the Applications folder.
 
-2. Open it from Applications. This build is not notarized by Apple, so macOS
+2. Recommended: check the download. This build is not signed with an Apple
+   Developer ID, so macOS cannot tell you who made it. Only use a .dmg from the
+   project's GitHub release page and compare it with SHA256SUMS.txt from the
+   same release (in Terminal, in the folder with both files):
+       shasum -a 256 -c SHA256SUMS.txt --ignore-missing
+   With the GitHub CLI you can also check that the project's GitHub build made it:
+       gh attestation verify OPCUA-Simulator-*.dmg --repo Manjuhombaradi/opcua-simulator
+
+3. Open it from Applications. This build is not notarized by Apple, so macOS
    blocks the first start ("OPC UA Simulator" Not Opened / cannot be verified).
    Click "Done" (not "Move to Trash"), then:
 
@@ -20,3 +28,6 @@ macOS asks only once. After that the app starts with a normal double-click.
 
 Headless mode (no window, e.g. over SSH):
     "/Applications/OPC UA Simulator.app/Contents/MacOS/OPC UA Simulator" --headless --help
+
+Security notes (network use, data on disk, secure settings):
+    https://github.com/Manjuhombaradi/opcua-simulator/blob/main/SECURITY.md

@@ -4,6 +4,8 @@
 # (the same port is published on the host, so the advertised endpoint URLs stay reachable).
 # Upgrading from an older image that ran as root: give the data volume to the "node" user once with
 #   docker compose run --rm --user root --entrypoint chown opcua-simulator -R node:0 /data
+# The demo defaults are made for test labs (anonymous read/write, unencrypted endpoint). For an
+# organisation network start it with `OPCUA_SECURE=1 docker compose up -d` (secure preset) and see SECURITY.md.
 services:
   opcua-simulator:
     build: .
@@ -11,7 +13,14 @@ services:
     # fixed name: it ends up in the server certificate and the endpoint URLs
     hostname: opcua-simulator
     ports:
+      # all interfaces of the Docker host; only this host: "127.0.0.1:${OPCUA_PORT:-4840}:${OPCUA_PORT:-4840}"
+      # (inside the container keep listening on all interfaces, i.e. do not set OPCUA_LISTEN=localhost)
       - "${OPCUA_PORT:-4840}:${OPCUA_PORT:-4840}"
+    # the simulator needs no Linux capabilities and never gains privileges
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
     environment:
       OPCUA_PORT: ${OPCUA_PORT:-4840}
       # empty = not set: the simulator then prints a warning with what to set
@@ -22,6 +31,11 @@ services:
       # URL(s) clients really use when the published port differs or the host sits behind NAT, comma separated:
       # OPCUA_ADVERTISED_URL: opc.tcp://192.168.1.20:4840
       # OPCUA_PROJECT: /projects/myplant.opcuasim   # project saved from the desktop app
+      # 1 = secure preset: no anonymous login, only encrypted endpoints, no certificate auto-accept, no discovery
+      #     (`OPCUA_SECURE=1 docker compose up -d`)
+      OPCUA_SECURE: ${OPCUA_SECURE:-}
+      # 1 = do not run the project's JavaScript method scripts (methods with a script return BadUserAccessDenied)
+      OPCUA_NO_SCRIPTS: ${OPCUA_NO_SCRIPTS:-}
       # OPCUA_NO_SECURITY: "1"
     volumes:
       - opcua-data:/data

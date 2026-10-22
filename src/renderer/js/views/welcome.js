@@ -1,5 +1,5 @@
 "use strict";
-/* First-run welcome / "New project" wizard: template, port, security preset, auto-start. */
+/* First-run welcome / "New project" wizard: template, port, security preset, network access, auto-start. */
 const SECURITY_PRESETS = {
     all: {
         label: "Recommended — unsecured and encrypted endpoints",
@@ -15,13 +15,20 @@ const SECURITY_PRESETS = {
         label: "Encrypted only",
         desc: "Only signed / encrypted endpoints, to test certificate handling of your client.",
         policies: ["Basic256Sha256", "Aes128_Sha256_RsaOaep", "Aes256_Sha256_RsaPss"], modes: ["Sign", "SignAndEncrypt"]
+    },
+    // applies the engine's SECURE_PRESET (more than policies and modes, see applySecurePreset)
+    org: {
+        label: "Secure (for organisations)",
+        desc: "Encrypted endpoints only, no anonymous login, unknown client certificates are rejected until you trust them (Certificates), no discovery registration. Clients log in with a user name and password or an X509 certificate.",
+        policies: null, modes: null
     }
 };
 
 function detectSecurityPreset(cfg) {
+    if (matchesSecurePreset(cfg)) return "org";
     const same = (a, b) => a.length === b.length && a.every((x) => b.includes(x));
     for (const [key, p] of Object.entries(SECURITY_PRESETS)) {
-        if (same(cfg.securityPolicies || [], p.policies) && same(cfg.securityModes || [], p.modes)) return key;
+        if (p.policies && same(cfg.securityPolicies || [], p.policies) && same(cfg.securityModes || [], p.modes)) return key;
     }
     return "custom";
 }
@@ -62,18 +69,21 @@ const Welcome = {
         const pick = async (id) => {
             if (id === "open") {
                 const r = await attempt(() => api.app("openProject"));
-                if (!r) return;
+                // a project from a file: its security settings are shown before anything is used
+                if (!r || !(await App.reviewOpenedProject(r))) return;
                 openedProject = r;
                 port.value = r.project.server.port || 4840;
                 setSecurityFrom(r.project.server, "Keep the project's custom settings");
+                setAccessFrom(r.project.server);
             } else if (choice === "open") {
                 // switching away from the opened file: back to the current project's values
                 port.value = cfg.port || 4840;
                 setSecurityFrom(cfg, "Keep current custom settings");
+                setAccessFrom(cfg);
             }
             choice = id;
             renderChoices();
-            updateLoginHint();
+            updateHints();
             checkPortNow();
         };
 
@@ -109,7 +119,28 @@ const Welcome = {
 
         const security = h("select");
         const secDesc = h("div", { class: "hint" });
-        const updateSecDesc = () => { secDesc.textContent = SECURITY_PRESETS[security.value]?.desc || "Security settings from the project are kept (see Configuration)."; };
+        const updateSecDesc = () => {
+            secDesc.textContent = SECURITY_PRESETS[security.value]?.desc || "Security settings from the project are kept (see Configuration).";
+            lockAnonForOrg();
+            updateHints();
+        };
+        // The secure preset only allows read access for anonymous users (and turns anonymous login off). The choice made
+        // before it is remembered, so that only looking at the secure preset does not leave anonymous clients read-only.
+        let anonBeforeOrg = null;
+        const lockAnonForOrg = () => {
+            const org = security.value === "org";
+            if (org && anonBeforeOrg === null) {
+                anonBeforeOrg = anonAccess.value;
+                anonAccess.value = "readonly";
+            } else if (!org && anonBeforeOrg !== null) {
+                anonAccess.value = anonBeforeOrg;
+                anonBeforeOrg = null;
+            }
+            anonAccess.disabled = org;
+            anonHint.textContent = org
+                ? "“Secure (for organisations)” lets anonymous clients only read. Pick another Security option to choose again."
+                : "Applies to clients that connect without logging in. Users with the Observer role can only read.";
+        };
         // Fills the dropdown for a server configuration; "custom" is offered only when it matches no preset.
         const setSecurityFrom = (srv, customLabel) => {
             const preset = detectSecurityPreset(srv);
@@ -119,14 +150,57 @@ const Welcome = {
             security.value = preset;
             updateSecDesc();
         };
+        // who can reach the server, and what anonymous clients may do
+        const listen = select([
+            { value: "all", label: "All network interfaces — other machines can connect" },
+            { value: "localhost", label: "This computer only (localhost)" }
+        ], "all");
+        const anonAccess = select([
+            { value: "readwrite", label: "Read, write and call methods" },
+            { value: "readonly", label: "Only read" }
+        ], "readwrite");
+        const anonHint = h("span");
+        const setAccessFrom = (srv) => {
+            listen.value = srv.listenAddress === "localhost" ? "localhost" : "all";
+            anonAccess.value = srv.anonymousAccess === "readonly" ? "readonly" : "readwrite";
+            // a new starting point: its own value is the one to restore when leaving the secure preset
+            anonBeforeOrg = null;
+            lockAnonForOrg();
+        };
+        setAccessFrom(cfg);
+        listen.addEventListener("change", () => updateHints());
+        anonAccess.addEventListener("change", () => updateHints());
         security.addEventListener("change", updateSecDesc);
-        setSecurityFrom(cfg, "Keep current custom settings");
 
         // Auto-start is pre-ticked only on a real first run; later the saved choice is kept.
         const autoStart = checkbox("Start the server automatically every time the application opens", App.settings.welcomeDone ? !!App.settings.autoStartServer : true);
         const net = App.meta.network || { addresses: [] };
         const loginHint = h("span");
-        const updateLoginHint = () => { loginHint.textContent = `Clients log in with: ${loginSummary(targetServer())}. `; };
+        const reachHint = h("span");
+        const listenHint = h("div", { class: "hint" });
+        const demoHint = h("div", { class: "notice warn small hidden", style: { marginTop: "6px" } });
+        // the server settings as they will be after Apply (for the hints)
+        const previewServer = () => {
+            const t = { ...targetServer() };
+            if (security.value === "org") applySecurePreset(t);
+            t.listenAddress = listen.value;
+            t.anonymousAccess = anonAccess.value;
+            return t;
+        };
+        const updateHints = () => {
+            const t = previewServer();
+            loginHint.textContent = `Clients log in with: ${loginSummary(t)}. `;
+            reachHint.textContent = listen.value === "localhost"
+                ? "Only programs on this computer can connect (opc.tcp://localhost:<port>)."
+                : net.addresses.length ? `Other machines connect via ${net.addresses.map((a) => `opc.tcp://${a}:<port>`).join(" or ")}.` : "";
+            listenHint.textContent = listen.value === "localhost"
+                ? "Other machines cannot reach the server; the endpoint URLs use localhost."
+                : "Anyone on your network who can reach this port can connect. Choose “This computer only” when only local programs need the server.";
+            const demo = t.allowUsername && (t.users || []).some(isDemoLogin);
+            demoHint.textContent = "The demo log-ins (admin/admin, operator/operator, viewer/viewer) are publicly known — change their passwords in Configuration → User Authentication before other machines can reach this server.";
+            demoHint.classList.toggle("hidden", !(demo && security.value === "org"));
+        };
+        setSecurityFrom(cfg, "Keep current custom settings");
 
         const body = h("div", { class: "stack", style: { gap: "18px" } },
             isWelcome ? h("div", { class: "muted" }, "Simulate an OPC UA server to test your client applications. Pick a starting point, check the port and press Start — your client can connect right away.") : null,
@@ -136,12 +210,14 @@ const Welcome = {
                     field("TCP port", h("div", { class: "row wrap" }, port, portState), "OPC UA default is 4840. Allow it in the firewall to connect from other machines."),
                     field("Security", security, null)),
                 secDesc,
-                h("div", { class: "hint", style: { marginTop: "6px" } },
-                    loginHint,
-                    net.addresses.length ? `Other machines connect via ${net.addresses.map((a) => `opc.tcp://${a}:<port>`).join(" or ")}.` : "")),
+                h("div", { class: "form-grid two", style: { marginTop: "12px" } },
+                    field("Listen on", listen, listenHint),
+                    field("Anonymous users can", anonAccess, anonHint)),
+                h("div", { class: "hint", style: { marginTop: "6px" } }, loginHint, reachHint),
+                demoHint),
             h("div", null, h("div", { class: "step-title" }, h("span", { class: "step-num" }, "3"), "Start"), autoStart));
         renderChoices();
-        updateLoginHint();
+        updateHints();
         checkPortNow();
 
         // A busy port is sorted out before anything is applied, so Back / Escape returns to the wizard.
@@ -166,15 +242,23 @@ const Welcome = {
             if (start && !(await resolvePort())) return false;
             if (choice !== "current") {
                 if (!(await App.confirmDiscard())) return false;
-                if (choice === "open") App.setProject(openedProject.project, openedProject.path);
-                else App.setProject(await api.app("newFromTemplate", choice, { count: Number(tagCount.value) }));
+                if (choice === "open") {
+                    App.setProject(openedProject.project, openedProject.path, { scriptsTrusted: openedProject.scriptsTrusted });
+                    if (openedProject.securePresetApplied) App.markDirty();
+                } else {
+                    // the built-in templates are part of the app: their method scripts are trusted
+                    App.setProject(await api.app("newFromTemplate", choice, { count: Number(tagCount.value) }), null, { scriptsTrusted: true });
+                }
             }
             const s = App.project.server;
-            const snapshot = () => JSON.stringify([s.port, [...(s.securityPolicies || [])].sort(), [...(s.securityModes || [])].sort()]);
+            const snapshot = () => JSON.stringify([s.port, [...(s.securityPolicies || [])].sort(), [...(s.securityModes || [])].sort(),
+                s.listenAddress, s.anonymousAccess, s.allowAnonymous, s.autoAcceptCertificates, s.registerToLds, s.runDiscoveryServer]);
             const before = snapshot();
             s.port = Number(port.value) || 4840;
             const p = SECURITY_PRESETS[security.value];
-            if (p) {
+            if (security.value === "org") {
+                applySecurePreset(s);
+            } else if (p) {
                 s.securityPolicies = [...p.policies];
                 s.securityModes = [...p.modes];
             } else if (choice !== "current" && choice !== "open") {
@@ -182,6 +266,8 @@ const Welcome = {
                 s.securityPolicies = [...(cfg.securityPolicies || [])];
                 s.securityModes = [...(cfg.securityModes || [])];
             }
+            s.listenAddress = listen.value;
+            if (security.value !== "org") s.anonymousAccess = anonAccess.value;
             // only an actual change makes the project "unsaved"
             if (snapshot() !== before) {
                 App.markDirty();

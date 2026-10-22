@@ -5,7 +5,12 @@ application (SCADA, MES, historian, gateway, edge agent and so on) against a ser
 timestamps, alarms and security you control. It runs on Windows, macOS and Linux, with or without a
 desktop, and in Docker.
 
-**Download:** [latest release](https://github.com/Manjuhombaradi/opcua-simulator/releases/latest) (Windows, macOS, Linux installers) · [source](https://github.com/Manjuhombaradi/opcua-simulator)
+**Download:** [latest release](https://github.com/Manjuhombaradi/opcua-simulator/releases/latest) (Windows, macOS, Linux installers) · [source](https://github.com/Manjuhombaradi/opcua-simulator) · [security notes](SECURITY.md)
+
+**Author:** Manjunagouda Hombaradi ([manjuhombaradi@gmail.com](mailto:manjuhombaradi@gmail.com))
+
+The app makes no network connections of its own (no telemetry, update checks or downloads). For use in
+an organisation network, apply the *Secure (for organisations)* preset; see [Security](#7-security).
 
 ---
 
@@ -26,13 +31,19 @@ Pick the file for your machine. None of them need Node.js, admin rights or extra
 
 ### First launch of the unsigned builds
 
-The installers are not code-signed yet, so the operating system asks once:
+The installers are not code-signed yet, so the operating system asks once. Before you allow it, check
+that the file is the one this project's GitHub build made: every release has `SHA256SUMS.txt`
+(`sha256sum -c SHA256SUMS.txt --ignore-missing` on Linux, `shasum -a 256 -c SHA256SUMS.txt --ignore-missing`
+on macOS, `Get-FileHash <file>` on Windows) and a build-provenance attestation
+(`gh attestation verify <file> --repo Manjuhombaradi/opcua-simulator`). Details in
+[SECURITY.md](SECURITY.md#unsigned-builds-and-how-to-verify-them).
 
 - **Windows SmartScreen** ("Windows protected your PC"): click **More info**, then **Run anyway**.
 - **macOS** ("cannot be opened" / "Not Opened"): open **System Settings → Privacy & Security** and click **Open Anyway**.
   Or run `xattr -dr com.apple.quarantine "/Applications/OPC UA Simulator.app"` once.
-- **Linux**: nothing to do. The packages include a launcher that handles the Chromium sandbox, root
-  logins and VMs without a display automatically.
+- **Linux**: nothing to do. The packages include a launcher that handles root logins and VMs without a
+  display automatically, and keeps Chromium's sandbox on wherever the system allows it
+  ([Linux sandbox](SECURITY.md#linux-sandbox)).
 
 ---
 
@@ -46,7 +57,10 @@ On first start a short wizard asks for three things:
    - *Empty project*.
    - *Open a project file* (`.opcuasim`) saved earlier, for example on another machine.
 2. **Port and security**. The wizard checks that the port is free and offers the next free port if it isn't.
-   Security presets: *Recommended* (unsecured and encrypted endpoints), *No security* or *Encrypted only*.
+   Security presets: *Recommended* (unsecured and encrypted endpoints), *No security*, *Encrypted only* or
+   *Secure (for organisations)* (encrypted only, no anonymous login, no automatic certificate trust, no
+   discovery). Also: *Listen on* all network interfaces or this computer only, and whether anonymous
+   users can read and write or only read.
 3. **Start automatically**. Tick this and the server is serving data as soon as the app opens, so launching
    the app is the only step.
 
@@ -63,7 +77,9 @@ The **Dashboard** lists the endpoint URLs with *Copy* and *Open in Client* butto
   addresses, so the URLs work even when the host name does not resolve.
 
 Logins for the demo project: **Anonymous**, `admin/admin`, `operator/operator`, `viewer/viewer`, or an
-X509 certificate. Change them in **Configuration → User Authentication**.
+X509 certificate. Change them in **Configuration → User Authentication**. `viewer` (role Observer) can
+only read; the other users and, by default, anonymous clients can also write values and call methods.
+X509 user certificates are never trusted automatically: trust them in **Certificates → User**.
 
 ### Networking tips for VMs
 
@@ -117,7 +133,9 @@ opcua-simulator --headless                        # Linux .deb (also automatic w
 "/Applications/OPC UA Simulator.app/Contents/MacOS/OPC UA Simulator" --headless   # macOS
 ```
 
-The **Help** view shows the exact command for your installation.
+The **Help** view shows the exact command for your installation. The banner lists security warnings for
+the current settings (for example anonymous write access on all interfaces). A hardened server:
+`opcua-simulator --headless --secure --listen localhost --no-scripts --project plant.opcuasim`.
 
 | Option | Environment variable | Meaning |
 |---|---|---|
@@ -128,6 +146,9 @@ The **Help** view shows the exact command for your installation.
 | `--hostname <name>` | `OPCUA_HOSTNAME` | Host name / IP used in endpoint URLs |
 | `--alt-hostnames <a,b>` | `OPCUA_ALT_HOSTNAMES` | Extra host names / IPs |
 | `--advertised-url <url>` | `OPCUA_ADVERTISED_URL` | Full URL clients use, e.g. behind NAT or with a different Docker port |
+| `--secure` | `OPCUA_SECURE=1` | Secure preset for organisations: encrypted endpoints only, no anonymous login, no automatic trust of client certificates, no discovery |
+| `--listen all\|localhost` | `OPCUA_LISTEN` | Listen on all network interfaces (default) or on this computer only (127.0.0.1, advertises only `localhost` URLs) |
+| `--no-scripts` | `OPCUA_NO_SCRIPTS=1` | Do not run the project's method scripts (methods with a script return `BadUserAccessDenied`); use it for projects you did not write |
 | `--no-security` | `OPCUA_NO_SECURITY=1` | Offer SecurityPolicy None only (logins stay possible) |
 | `--regenerate-cert` | `OPCUA_REGENERATE_CERT=1` | Create a new server certificate for the current names / IPs |
 | `--data-dir <dir>` | `OPCUA_DATA_DIR` | Certificates and logs |
@@ -147,7 +168,8 @@ OPCUA_HOSTNAME=<ip-of-the-docker-host> docker compose up -d
 
 To serve your own project, put the `.opcuasim` file in `./projects` and set
 `OPCUA_PROJECT=/projects/<file>.opcuasim` in `docker-compose.yml`. Certificates live in the `opcua-data`
-volume.
+volume. Secure preset: `OPCUA_SECURE=1 docker compose up -d` (or `docker run ... opcua-simulator --secure`).
+The image runs as an unprivileged user, and `docker-compose.yml` drops all Linux capabilities.
 
 ---
 
@@ -162,24 +184,55 @@ volume.
   - macOS: `~/Library/Application Support/OPC UA Simulator`
   - Linux: `~/.config/OPC UA Simulator`
 - Logs: `logs/simulator.log` in the data folder, or `logs/headless.log` in headless mode.
+- On macOS and Linux the data folder and the files the app writes (including saved projects) can only be
+  read by your user account. Project files contain the server's user passwords: keep that in mind before
+  you share one.
 
 ---
 
-## 7. Troubleshooting
+## 7. Security
+
+Full details for security teams: **[SECURITY.md](SECURITY.md)** (network behaviour, stored data, Electron
+hardening, third-party components, verifying downloads, reporting a vulnerability).
+
+- **No network use of its own**: no telemetry, update checks, crash reports or downloads. Only the OPC UA
+  server you start and the connections you make in the Client use the network.
+- **Demo defaults are for test labs** (anonymous read/write, SecurityPolicy None, demo passwords, automatic
+  trust of client certificates). The Dashboard shows a *Security warnings* card while such settings are
+  active. For an organisation network:
+  - Welcome wizard → *Secure (for organisations)*, or **Configuration → Security → Apply secure settings**;
+  - **Configuration → Startup & Network → Listen on: This computer only** when all clients run on this machine;
+  - **Anonymous users can: Only read**, and replace the demo users;
+  - headless / Docker: `--secure`, `--listen localhost`, `--no-scripts` (see [Headless and Docker](#5-headless-and-docker)).
+- **Method scripts** run in an isolated QuickJS (WebAssembly) sandbox with time and memory limits. Scripts
+  in a project file from someone else run only after you reviewed and trusted them when the server starts
+  (or start with scripts disabled).
+- **Certificates**: X509 user certificates and the certificates of servers the built-in Client connects to
+  are never trusted automatically; you decide in **Certificates** or in the Client's prompt.
+- **Installers** are not code-signed yet; check downloads with `SHA256SUMS.txt` and the build-provenance
+  attestation of each release. Each release also has a CycloneDX SBOM.
+- **Report a vulnerability** privately: GitHub **Security** tab → **Report a vulnerability**.
+
+---
+
+## 8. Troubleshooting
 
 | Problem | Fix |
 |---|---|
 | *Port is already in use* | Another program, or a second copy of the simulator, uses the port. The app offers the next free port. |
 | Client on another machine cannot connect | Check the firewall and the VM network mode, and use the IP-based endpoint URL. |
 | `BadSecurityChecksFailed` / certificate rejected | Trust the client in **Certificates → Server application PKI → Rejected**, or enable *Automatically trust unknown client certificates* in Configuration. |
-| `BadUserAccessDenied` | Wrong user name or password, or that login type is disabled in Configuration. |
+| `BadUserAccessDenied` | Wrong user name or password, or that login type is disabled in Configuration. On a write or method call: the user's role is Observer (read only), anonymous users may only read (*Anonymous users can*), or method scripts are disabled for this start. |
+| Client: *server certificate is not trusted* | The built-in Client never trusts an unknown server certificate on its own. Check subject and thumbprint in the prompt, then *Trust and connect*. |
+| A project asks to trust its method scripts | The project contains JavaScript method scripts that were not written or approved on this computer. Review them, then *Trust and start*, or *Start with scripts disabled*. |
 | Blank window in a VM | Start with `OPCUA_DISABLE_GPU=1` or `--disable-gpu`. |
 | Linux: missing libraries | The launcher prints the exact `apt` / `dnf` command to run. The `.deb` installs them automatically. |
 | Linux AppImage does not start | Use the `.deb` or `.tar.gz`, or extract it once: `./OPCUA-Simulator-*.AppImage --appimage-extract && ./squashfs-root/AppRun` |
+| Linux: *Chromium sandbox disabled: ...* | The launcher turned the sandbox off because it cannot work here (root, container, or no user namespaces). The app works; to keep the sandbox on see [Linux sandbox](SECURITY.md#linux-sandbox). If the window does not open in an unusual environment, start it with `--no-sandbox`. |
 
 ---
 
-## 8. Run from source and build the installers
+## 9. Run from source and build the installers
 
 Requires **Node.js 22.13 or newer**.
 
@@ -201,9 +254,12 @@ npm run dist:linux    # .deb, AppImage, .tar.gz (x64 and arm64)
 ```
 
 Each OS is best built on itself. The included GitHub Actions workflow (`.github/workflows/build.yml`)
-does this for all three. Push a tag such as `v1.0.0` to get a GitHub release with every installer.
+does this for all three. Push a tag such as `v1.0.1` to get a GitHub release with every installer,
+`SHA256SUMS.txt`, a CycloneDX SBOM and a build-provenance attestation. The workflow stops on known
+high/critical vulnerabilities in production dependencies (`npm audit`) and on packages with invalid
+registry signatures, and checks the Electron fuses of every build (`node scripts/verify-build.js`).
 Signing: set a Developer ID / notarization (macOS) or a code-signing certificate (Windows) in
-`package.json → build` to remove the first-launch warnings.
+`package.json → build` to remove the first-launch warnings (see [SECURITY.md](SECURITY.md#unsigned-builds-and-how-to-verify-them)).
 
 ### Project layout
 ```
@@ -212,9 +268,11 @@ src/main/       Electron main process
   serverEngine.js    OPC UA server, simulation, alarms, events, history
   clientEngine.js    OPC UA client
   headless.js        headless runner (shared by cli.js and --headless)
+  methodScript.js    QuickJS (WebAssembly) sandbox for method scripts
   network.js         port checks, local addresses
   project.js         templates, project files
 src/renderer/   UI (plain HTML/CSS/JS, no build step)
 src/cli.js      headless entry point for Node.js / Docker
-build/          icon and the Linux launcher hook (afterPack.js)
+build/          icon, the afterPack hook (Linux launcher, Linux fuses, macOS licence notices), AppArmor profile
+scripts/        dev launcher (npm start), build check (verify-build.js), SBOM completion (sbom-finish.js)
 ```

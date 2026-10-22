@@ -3,7 +3,7 @@
 const os = require("os");
 const path = require("path");
 const fs = require("fs");
-const { ServerEngine, parseAdvertisedUrls } = require("./serverEngine");
+const { ServerEngine, parseAdvertisedUrls, SECURE_PRESET, securityWarnings, projectScriptSummary } = require("./serverEngine");
 const { fromTemplate, readProjectFile, PROJECT_EXTENSIONS } = require("./project");
 const { DEFAULT_USERS } = require("./defaultProject");
 const { localIPv4Addresses } = require("./network");
@@ -29,6 +29,11 @@ Options (environment variable in brackets):
   --advertised-url <urls>  Extra comma separated endpoint URLs for NAT / port mapping,    [OPCUA_ADVERTISED_URL]
                            e.g. opc.tcp://192.168.1.20:48552 for docker run -p 48552:4840
   --data-dir <dir>         Folder for certificates (PKI) and logs                         [OPCUA_DATA_DIR]
+  --secure                 Apply the secure preset for organisations (no anonymous, only    [OPCUA_SECURE=1]
+                           encrypted policies, no auto-accept, no discovery/LDS)
+  --no-scripts             Do not run method scripts (refuse calls to methods that have one, [OPCUA_NO_SCRIPTS=1]
+                           for projects whose scripts you do not trust)
+  --listen <where>         all (default) | localhost (loopback only, advertises localhost)   [OPCUA_LISTEN]
   --no-security            Only offer SecurityPolicy None (quick tests); user name and    [OPCUA_NO_SECURITY=1]
                            certificate logins stay available
   --regenerate-cert        New self-signed server certificate with the current host names / IPs (one-off)
@@ -54,11 +59,12 @@ const VALUE_OPTIONS = {
     hostname: ["--hostname", "OPCUA_HOSTNAME"],
     altHostnames: ["--alt-hostnames", "OPCUA_ALT_HOSTNAMES"],
     advertisedUrls: ["--advertised-url", "OPCUA_ADVERTISED_URL"],
-    dataDir: ["--data-dir", "OPCUA_DATA_DIR"]
+    dataDir: ["--data-dir", "OPCUA_DATA_DIR"],
+    listen: ["--listen", "OPCUA_LISTEN"]
 };
 // repeating these flags adds to the list instead of replacing it
 const LIST_OPTIONS = ["altHostnames", "advertisedUrls"];
-const FLAG_OPTIONS = { "--no-security": "noSecurity", "--regenerate-cert": "regenerateCertForce", "--verbose": "verbose", "--help": "help", "-h": "help" };
+const FLAG_OPTIONS = { "--no-security": "noSecurity", "--secure": "secure", "--no-scripts": "noScripts", "--regenerate-cert": "regenerateCertForce", "--verbose": "verbose", "--help": "help", "-h": "help" };
 // accepted and ignored: the Linux launcher and Electron pass them through; --start (a desktop option)
 // is what headless mode always does, so `opcua-simulator --start` also works on a machine without display
 const NO_OP_FLAGS = ["--headless", "--no-sandbox", "--disable-gpu", "--start"];
@@ -86,6 +92,8 @@ function parseArgs(argv, env = process.env, { allowUnknown = false } = {}) {
     if (logLevel && !["debug", "info"].includes(logLevel)) errors.push(`OPCUA_LOG_LEVEL="${env.OPCUA_LOG_LEVEL}" is not valid (use debug or info)`);
     const opts = {
         noSecurity: parseBool(env.OPCUA_NO_SECURITY, "OPCUA_NO_SECURITY", errors),
+        secure: parseBool(env.OPCUA_SECURE, "OPCUA_SECURE", errors),
+        noScripts: parseBool(env.OPCUA_NO_SCRIPTS, "OPCUA_NO_SCRIPTS", errors),
         // the variable is usually permanent (docker compose): renew only when host names / IPs changed
         regenerateCert: parseBool(env.OPCUA_REGENERATE_CERT, "OPCUA_REGENERATE_CERT", errors),
         regenerateCertForce: false,
@@ -168,6 +176,9 @@ function parseArgs(argv, env = process.env, { allowUnknown = false } = {}) {
     if (raw.template && !TEMPLATES.includes(raw.template.value)) {
         errors.push(`${label("template")} is not a template (use ${TEMPLATES.join(", ")})`);
     }
+    if (raw.listen && !["all", "localhost"].includes(raw.listen.value.toLowerCase())) {
+        errors.push(`${label("listen")} is not valid (use all or localhost)`);
+    }
     if (raw.project && !fs.existsSync(path.resolve(raw.project.value))) {
         errors.push(`Project file not found: ${path.resolve(raw.project.value)}`);
     }
@@ -195,7 +206,8 @@ function parseArgs(argv, env = process.env, { allowUnknown = false } = {}) {
         hostname: get("hostname"),
         altHostnames: get("altHostnames"),
         advertisedUrls: get("advertisedUrls"),
-        dataDir: get("dataDir")
+        dataDir: get("dataDir"),
+        listen: get("listen") ? get("listen").toLowerCase() : null
     });
 }
 
@@ -203,17 +215,26 @@ function formatLog(l) {
     return `${l.time} ${l.level.toUpperCase().padEnd(5)} [${l.source}] ${l.message}`;
 }
 
+// Create a directory (recursively) private to this user (0o700), so logs, project copies and PKI are not
+// world-readable on multi-user or Docker-group hosts (SS-14). Best effort on platforms without POSIX modes.
+function secureMkdir(dir) {
+    fs.mkdirSync(dir, { recursive: true, mode: 0o700 });
+    try { fs.chmodSync(dir, 0o700); } catch (_) { /* e.g. Windows: modes are not enforced */ }
+}
+
 // Appends lines to <dir>/headless.log. Rotation is checked at start and while running: a container with
 // "restart: unless-stopped" may run for months without a restart.
 function openLogFile(dir) {
-    fs.mkdirSync(dir, { recursive: true });
+    secureMkdir(dir);
     const file = path.join(dir, "headless.log");
     const oldFile = path.join(dir, "headless.old.log");
     let stream = null;
     let size = 0;
     const open = () => {
-        // opened synchronously, so a read-only data folder is reported before the server starts
-        const fd = fs.openSync(file, "a");
+        // opened synchronously, so a read-only data folder is reported before the server starts;
+        // mode 0o600 keeps logs (user names, client IPs, written values) unreadable by other local users (SS-14)
+        const fd = fs.openSync(file, "a", 0o600);
+        try { fs.chmodSync(file, 0o600); } catch (_) { /* best effort on platforms without POSIX modes */ }
         size = fs.fstatSync(fd).size;
         stream = fs.createWriteStream(file, { fd });
         stream.on("error", () => { /* logging must never stop the server */ });
@@ -249,7 +270,7 @@ function openLogFile(dir) {
 
 // Throws when files cannot be created in `dir` (e.g. a Docker volume owned by root, the image runs as non-root).
 function checkWritable(dir) {
-    fs.mkdirSync(dir, { recursive: true });
+    secureMkdir(dir);
     const probe = path.join(dir, `.write-test-${process.pid}`);
     try {
         fs.writeFileSync(probe, "");
@@ -284,7 +305,8 @@ function withResourcePath(url, resourcePath) {
 }
 
 // Connect URLs, security and log-ins as the running server really offers them (not as configured).
-function bannerLines(engine, cfg, opts) {
+function bannerLines(engine, project, opts) {
+    const cfg = project.server;
     const lines = [""];
     const port = Number(cfg.port) || 4840;
     const resourcePath = cfg.resourcePath || "";
@@ -341,6 +363,15 @@ function bannerLines(engine, cfg, opts) {
         });
         lines.push(users.length ? `Users: ${users.join(", ")}` : "Users: none defined in the project, so every user name login fails");
     }
+    const warnings = securityWarnings(project).filter(Boolean);
+    if (warnings.length) {
+        lines.push("", "Security notes:");
+        for (const w of warnings) lines.push(`  - ${w}`);
+        lines.push(opts.secure ? "  See SECURITY.md for hardening guidance." : "  Run with --secure for the hardened preset, or see SECURITY.md.");
+    }
+    if (opts.noScripts && projectScriptSummary(project).length) {
+        lines.push("Method scripts are disabled (--no-scripts): methods with a script return BadUserAccessDenied.");
+    }
     lines.push("Press Ctrl+C to stop.", "");
     return lines;
 }
@@ -366,6 +397,7 @@ async function runHeadless(argv, { defaultDataDir, write = (line) => console.log
     const dataDir = path.resolve(opts.dataDir || defaultDataDir || path.join(process.cwd(), "opcua-simulator-data"));
     let logFile;
     try {
+        secureMkdir(dataDir); // the data folder itself is private to this user (SS-14)
         logFile = openLogFile(path.join(dataDir, "logs"));
         checkWritable(path.join(dataDir, "pki"));
     } catch (err) {
@@ -388,10 +420,13 @@ async function runHeadless(argv, { defaultDataDir, write = (line) => console.log
         return fail(err.message);
     }
     const cfg = project.server;
+    // --secure applies the hardened preset first, so an explicit --listen / --no-security after it still wins
+    if (opts.secure) Object.assign(cfg, SECURE_PRESET);
     if (opts.port) cfg.port = opts.port;
     if (opts.hostname) cfg.hostname = opts.hostname;
     if (opts.altHostnames) cfg.alternateHostnames = [cfg.alternateHostnames, opts.altHostnames].filter(Boolean).join(",");
     if (opts.advertisedUrls) cfg.advertisedUrls = [cfg.advertisedUrls, opts.advertisedUrls].filter(Boolean).join(",");
+    if (opts.listen) cfg.listenAddress = opts.listen;
     if (opts.noSecurity) {
         cfg.securityPolicies = ["None"];
         cfg.securityModes = ["None"];
@@ -429,7 +464,7 @@ async function runHeadless(argv, { defaultDataDir, write = (line) => console.log
         }
     }
     try {
-        await engine.start(project);
+        await engine.start(project, { allowScripts: !opts.noScripts });
     } catch (err) {
         write(`ERROR: ${err.message.replace(/ \[suggested-port:\d+\]$/, "")}`);
         if (err.suggestedPort) write(`Hint: start with --port ${err.suggestedPort}`);
@@ -438,7 +473,7 @@ async function runHeadless(argv, { defaultDataDir, write = (line) => console.log
         onExit(1);
         return null;
     }
-    for (const line of bannerLines(engine, cfg, opts)) write(line);
+    for (const line of bannerLines(engine, project, opts)) write(line);
 
     // optional liveness file for container health checks (touched while the server runs)
     let healthTimer = null;

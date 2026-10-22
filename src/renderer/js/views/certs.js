@@ -12,10 +12,13 @@ const Certs = {
                 [["server", "Server application PKI"], ["user", "User certificates (X509 tokens)"], ["client", "Client application PKI"]].map(([id, label]) =>
                     h("button", { class: `tab ${this.store === id ? "active" : ""}`, onclick: () => { this.store = id; render(); } }, label)));
             root.appendChild(tabs);
+            const autoAccept = !!App.project.server.autoAcceptCertificates;
             const help = {
-                server: "Certificates of client applications connecting over Sign / SignAndEncrypt. Rejected clients appear under Rejected — trust them to allow the connection.",
-                user: "Certificates used as X509 user identity tokens. Trust a user certificate to allow that user to activate a session.",
-                client: "Certificates of servers the built-in client connects to, and the client's own application certificate."
+                server: `Certificates of client applications connecting over Sign / SignAndEncrypt. ${autoAccept
+                    ? "Unknown clients are trusted automatically while Configuration → Security → “Automatically trust unknown client application certificates” is on."
+                    : "Unknown clients are refused and appear under Rejected — trust them to allow the connection."}`,
+                user: "Certificates used as X509 user identity tokens (log-in with a certificate). User certificates are never trusted automatically, whatever the Configuration says: a refused log-in puts its certificate under Rejected — press Trust to allow that user.",
+                client: "Certificates of servers the built-in client connects to, and the client's own application certificate. Server certificates are never trusted automatically: when the Client meets an unknown server certificate it shows it and asks you first (the simulator's own server is trusted without asking)."
             }[this.store];
             root.appendChild(h("div", { class: "muted" }, help));
             let data;
@@ -36,7 +39,7 @@ const Certs = {
             };
             root.appendChild(h("div", { class: "toolbar" },
                 h("span", { class: "code" }, data.rootDir),
-                h("button", { class: "btn small", onclick: () => api.app("openFolder", data.rootDir) }, "Open folder"),
+                h("button", { class: "btn small", onclick: () => attempt(() => api.app("openFolder", `pki-${this.store}`)) }, "Open folder"),
                 h("button", { class: "btn small", onclick: () => importCert("import") }, "Import trusted certificate…"),
                 h("button", { class: "btn small", onclick: () => importCert("importIssuer") }, "Import CA / issuer…"),
                 this.store === "server" ? h("button", { class: "btn small", title: "Creates a new self-signed certificate with the current host names and IP addresses on next start", onclick: async () => {
@@ -56,9 +59,13 @@ const Certs = {
                             h("td", null, c.validTo ? h("span", { class: `badge ${c.expired ? "bad" : "good"}` }, c.validTo.slice(0, 10)) : ""),
                             h("td", { class: "mono small", style: { cursor: "pointer" }, onclick: () => copyText(c.thumbprint) }, (c.thumbprint || "").slice(0, 16) + "…"),
                             h("td", { class: "actions" }, h("div", { class: "btn-group", style: { justifyContent: "flex-end" } }, actions(c)))))))));
-            const showBtn = (c) => h("button", { class: "btn small", onclick: () => api.app("showItem", c.file) }, "Show");
+            const showBtn = (c) => h("button", { class: "btn small", onclick: () => attempt(() => api.app("showItem", c.file)) }, "Show");
+            // version 1.0.0 trusted unknown user certificates automatically: those stay trusted until deleted
+            if (this.store === "user" && data.trusted.length) {
+                root.appendChild(h("div", { class: "notice warn" }, "Check the trusted user certificates below: version 1.0.0 trusted unknown user certificates automatically. Delete any certificate you do not recognise — it lets its owner log in."));
+            }
             root.appendChild(table("Own certificate", data.own, (c) => [showBtn(c)]));
-            root.appendChild(table("Rejected", data.rejected, (c) => [
+            root.appendChild(table(this.store === "user" ? "Rejected (refused log-ins)" : "Rejected", data.rejected, (c) => [
                 h("button", { class: "btn small primary", onclick: () => act("trust", c.file) }, "Trust"),
                 h("button", { class: "btn small", onclick: () => act("delete", c.file) }, "Delete")]));
             root.appendChild(table("Trusted", data.trusted, (c) => [

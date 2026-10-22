@@ -1,0 +1,34 @@
+# Weekly update proposals (pull requests) for npm packages, the pinned GitHub Actions SHAs and the pinned
+# Docker base image digest. Security updates are proposed as soon as an advisory is published.
+version: 2
+updates:
+  - package-ecosystem: npm
+    directory: /
+    schedule:
+      interval: weekly
+    open-pull-requests-limit: 10
+    groups:
+      electron:
+        patterns: ["electron", "electron-builder"]
+      node-opcua:
+        patterns: ["node-opcua", "node-opcua-*"]
+      # the QuickJS engine and its WebAssembly build must stay on the same version
+      quickjs:
+        patterns: ["quickjs-emscripten-core", "@jitl/quickjs-*"]
+
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
+    groups:
+      github-actions:
+        patterns: ["*"]
+
+  - package-ecosystem: docker
+    directory: /
+    schedule:
+      interval: weekly
+    ignore:
+      # stay on the Node.js 22 line of the base image; new digests (security fixes) are still proposed
+      - dependency-name: node
+        update-types: ["version-update:semver-major"]

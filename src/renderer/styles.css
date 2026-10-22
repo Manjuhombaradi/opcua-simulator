@@ -274,3 +274,20 @@ hr.sep { border: 0; border-top: 1px solid var(--border); margin: 14px 0; }
 .help ul { margin: 4px 0; padding-left: 20px; }
 .help code { font-family: var(--mono); font-size: 12px; background: var(--panel-2); border: 1px solid var(--border); border-radius: 4px; padding: 1px 5px; color: var(--text); }
 kbd { font-family: var(--mono); font-size: 11px; border: 1px solid var(--border-strong); border-bottom-width: 2px; border-radius: 4px; padding: 0 5px; background: var(--panel-2); }
+
+/* ------------------------------------------------------------ security */
+.password-field { display: inline-flex; align-items: center; gap: 2px; width: 100%; }
+.password-field input { flex: 1; }
+.password-field .btn.active { color: var(--accent); }
+.warning-list { margin: 0; padding: 0; list-style: none; display: flex; flex-direction: column; gap: 6px; }
+.warning-item { padding: 7px 10px 7px 12px; border-radius: 7px; border-left: 3px solid var(--warn); background: var(--warn-soft); color: var(--text); line-height: 1.45; }
+.warning-item.info { border-left-color: var(--accent); background: var(--accent-soft); }
+.notice { padding: 9px 12px; border-radius: 8px; border: 1px solid var(--border); background: var(--panel-2); color: var(--text-2); line-height: 1.5; }
+.notice.warn { border-color: transparent; background: var(--warn-soft); color: var(--text); }
+.notice.good { border-color: transparent; background: var(--good-soft); color: var(--text); }
+.script-list { display: flex; flex-direction: column; gap: 12px; }
+.script-path { font-weight: 600; margin-bottom: 4px; font-family: var(--mono); font-size: 12px; }
+.script-code { margin: 0; font-family: var(--mono); font-size: 12px; background: var(--panel-2); border: 1px solid var(--border); border-radius: 7px; padding: 8px 10px; max-height: 220px; overflow: auto; white-space: pre; tab-size: 4; }
+.cert-facts { display: grid; grid-template-columns: 150px 1fr; gap: 4px 12px; font-size: 12px; }
+.cert-facts > div:nth-child(odd) { color: var(--text-2); font-weight: 600; }
+.cert-facts > div:nth-child(even) { font-family: var(--mono); word-break: break-all; }

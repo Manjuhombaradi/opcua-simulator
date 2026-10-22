@@ -434,9 +434,15 @@ const Designer = {
         script.addEventListener("input", () => { m.script = script.value; changed(); });
         const paths = this.allVariables().map((x) => x.path);
         el.appendChild(h("div", { class: "section-title", style: { marginTop: "18px" } }, "Implementation (JavaScript)"));
+        if (!App.scriptsTrusted) {
+            el.appendChild(h("div", { class: "notice warn small", style: { marginBottom: "8px" } },
+                "The scripts of this project came from a project file and are not trusted on this computer yet. They run only after you review and trust them when the server starts."));
+        }
         el.appendChild(script);
         el.appendChild(h("div", { class: "hint", style: { marginTop: "6px" } },
-            "Available: inputs[] (input argument values), getValue(path), setValue(path, value), log(message). Return an array with one value per output argument. Execution timeout 1 s."));
+            "Available: inputs[] (input argument values), getValue(path), setValue(path, value), log(message). Return an array with one value per output argument. ",
+            "Scripts run in an isolated sandbox without access to files, the network or other programs; each call is limited to 1 s, 32 MB and 10 000 getValue / setValue / log calls. ",
+            "Scripts you write here are trusted on this computer."));
         el.appendChild(h("details", { style: { marginTop: "8px" } }, h("summary", { class: "small" }, `Variable paths (${paths.length})`),
             h("div", { class: "mono small", style: { maxHeight: "160px", overflow: "auto", marginTop: "6px" } }, paths.map((p) => h("div", { style: { cursor: "pointer" }, onclick: () => copyText(p) }, p)))));
     },

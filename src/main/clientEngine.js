@@ -3,6 +3,7 @@
 // events/alarms, method calls and history read against any OPC UA server.
 const path = require("path");
 const fs = require("fs");
+const crypto = require("crypto");
 const { EventEmitter } = require("events");
 const {
     OPCUAClient,
@@ -64,6 +65,8 @@ class ClientEngine extends EventEmitter {
         this.state = "disconnected";
         this.connectionInfo = null;
         this.dataTypeCache = new Map();
+        this.rejectedServerCertificate = null; // details of the last untrusted server certificate (for the trust dialog)
+        this.clientCertificateRejection = null; // details of the last "server refused our client certificate" failure
     }
 
     log(level, message) {
@@ -77,10 +80,89 @@ class ClientEngine extends EventEmitter {
 
     async certificateManager() {
         if (!this.cm) {
-            this.cm = new OPCUACertificateManager({ rootFolder: path.join(this.dataDir, "pki", "client"), automaticallyAcceptUnknownCertificate: true });
+            // The built-in client does NOT auto-accept unknown server certificates (SS-04/UC-5): a man-in-the-middle
+            // could otherwise present any certificate and receive the user's credentials. An unknown server
+            // certificate is rejected; connect() then surfaces it so the user can inspect and trust it explicitly.
+            this.cm = new OPCUACertificateManager({ rootFolder: path.join(this.dataDir, "pki", "client"), automaticallyAcceptUnknownCertificate: false });
             await this.cm.initialize();
+            await this.trustOwnServerCertificate();
         }
         return this.cm;
+    }
+
+    // Trust this simulator's OWN server certificate automatically, so "Open in Client" against the local
+    // server connects without a trust prompt. Only the local server's own certificate is trusted this way
+    // (same data directory); certificates of any other server still require explicit approval.
+    async trustOwnServerCertificate() {
+        try {
+            const dir = path.join(this.dataDir, "pki", "server", "own", "certs");
+            if (!this.cm || !fs.existsSync(dir)) return;
+            for (const f of fs.readdirSync(dir)) {
+                if (!/\.(pem|der)$/i.test(f)) continue;
+                const der = Buffer.from(new crypto.X509Certificate(fs.readFileSync(path.join(dir, f))).raw);
+                await this.cm.trustCertificate(der);
+            }
+        } catch (_) { /* best effort: a missing/unreadable own certificate just means a normal trust prompt */ }
+    }
+
+    // Human-readable details of a DER certificate, for the "trust this server?" dialog.
+    certificateDetails(der) {
+        const cert = new crypto.X509Certificate(der);
+        return {
+            subject: cert.subject.replace(/\n/g, ", "),
+            issuer: cert.issuer.replace(/\n/g, ", "),
+            thumbprint: cert.fingerprint.replace(/:/g, "").toLowerCase(), // SHA-1, hex
+            thumbprint256: cert.fingerprint256.replace(/:/g, "").toLowerCase(),
+            validFrom: new Date(cert.validFrom).toISOString(),
+            validTo: new Date(cert.validTo).toISOString(),
+            der: Buffer.from(cert.raw).toString("base64")
+        };
+    }
+
+    // The server certificate offered on `url` for the requested security policy/mode (DER), fetched over an
+    // unsecured discovery connection. Used to show an untrusted certificate's details without trusting it.
+    async serverCertificateFor(url, securityPolicy, securityMode) {
+        const client = await this.createClient({ maxRetry: 0 });
+        try {
+            await client.connect(url);
+            const endpoints = await client.getEndpoints();
+            const want = endpoints.find((e) => (e.securityPolicyUri || "").split("#")[1] === securityPolicy && MessageSecurityMode[e.securityMode] === securityMode);
+            const chosen = want || endpoints.find((e) => e.serverCertificate && e.serverCertificate.length);
+            return chosen && chosen.serverCertificate && chosen.serverCertificate.length ? Buffer.from(chosen.serverCertificate) : null;
+        } finally {
+            try { await client.disconnect(); } catch (_) { /* ignore */ }
+        }
+    }
+
+    // Details of the last server certificate that was rejected as untrusted (null when none). Shown by the
+    // renderer's "Trust and connect" dialog.
+    lastRejectedServerCertificate() {
+        return this.rejectedServerCertificate;
+    }
+
+    // Move a server certificate (DER, base64) into the client's trusted store so the next connect succeeds.
+    async trustServerCertificate(derBase64) {
+        const der = Buffer.from(String(derBase64 || ""), "base64");
+        if (!der.length) throw new Error("No certificate to trust");
+        const cm = await this.certificateManager();
+        await cm.trustCertificate(der);
+        // remove it from the rejected folder if node-opcua put a copy there
+        try {
+            const thumb = new crypto.X509Certificate(der).fingerprint.replace(/:/g, "").toLowerCase();
+            const rejected = cm.rejectedFolder;
+            if (rejected && fs.existsSync(rejected)) {
+                for (const f of fs.readdirSync(rejected)) {
+                    const file = path.join(rejected, f);
+                    if (!/\.(pem|der)$/i.test(f)) continue;
+                    try {
+                        if (new crypto.X509Certificate(fs.readFileSync(file)).fingerprint.replace(/:/g, "").toLowerCase() === thumb) fs.unlinkSync(file);
+                    } catch (_) { /* ignore unreadable entries */ }
+                }
+            }
+        } catch (_) { /* the trust itself is what matters */ }
+        if (this.rejectedServerCertificate && this.rejectedServerCertificate.der === Buffer.from(der).toString("base64")) this.rejectedServerCertificate = null;
+        this.log("info", "Server certificate trusted");
+        return true;
     }
 
     async createClient(opts = {}) {
@@ -143,6 +225,9 @@ class ClientEngine extends EventEmitter {
         this.connectionInfo = { url: opts.url, securityMode: opts.securityMode, securityPolicy: opts.securityPolicy, authType: opts.authType };
         this.setState("connecting");
         const client = await this.createClient({ ...opts, maxRetry: opts.autoReconnect ? -1 : 1 });
+        // keep the local server's own certificate trusted even if it was (re)generated after the client PKI
+        // was first opened, so "Open in Client" against this simulator never prompts
+        await this.trustOwnServerCertificate();
         this.client = client;
         client.on("backoff", (n, delay) => this.log("warn", `Connection attempt ${n} failed, retrying in ${delay} ms`));
         // ignore late events of a client that has already been disconnected / replaced
@@ -160,14 +245,115 @@ class ClientEngine extends EventEmitter {
             session.on("session_closed", (sc) => this.log("warn", `Session closed by server (${sc?.name || ""})`));
             session.on("session_restored", () => this.log("info", "Session restored"));
             await this.createSubscription(opts);
+            this.clientCertificateRejection = null;
             this.log("info", `Connected to ${opts.url} (${opts.securityPolicy}/${opts.securityMode}, ${opts.authType})`);
             this.setState("connected", { sessionId: session.sessionId.toString() });
         } catch (err) {
-            this.log("error", `Connect failed: ${err.message}`);
             await this.disconnect(true);
+            // A certificate problem has two very different causes, told apart by checking the server's certificate
+            // against this client's own trust list:
+            //  - this client does not trust the SERVER's certificate (SS-04/UC-5): report it so the renderer can
+            //    show the certificate's details and let the user trust it explicitly, then retry;
+            //  - the client trusts the server, but the SERVER refused this client's application certificate
+            //    (node-opcua reports that as BadSecurityChecksFailed): trusting the server again cannot help, the
+            //    client certificate has to be trusted on the server.
+            if (/certificate verification failed|BadCertificate|BadSecurityChecksFailed/i.test(err.message || "")) {
+                const problem = await this.classifyCertificateFailure(client, opts, err);
+                if (problem) {
+                    this.log("warn", problem.readable);
+                    this.setState("disconnected", { error: problem.error.message });
+                    throw problem.error;
+                }
+            }
+            this.log("error", `Connect failed: ${err.message}`);
             this.setState("disconnected", { error: err.message });
             throw err;
         }
+    }
+
+    // Works out which side refused the certificate after a failed connect (see connect()). Returns
+    // { error, readable } or null when it cannot tell (the original error is then reported as is).
+    async classifyCertificateFailure(client, opts, err) {
+        let der = null;
+        try {
+            der = await this.serverCertificateFor(opts.url, opts.securityPolicy, opts.securityMode);
+        } catch (_) { /* fall back to the error text below */ }
+        const cm = await this.certificateManager();
+        let trustStatus = null;
+        if (der) {
+            try { trustStatus = await cm.isCertificateTrusted(der); } catch (_) { trustStatus = null; }
+        }
+        const serverRefusedUs = /BadSecurityChecksFailed/i.test(err.message || "") && !/certificate verification failed/i.test(err.message || "");
+        if (der && trustStatus !== "Good") {
+            const details = this.certificateDetails(der);
+            this.rejectedServerCertificate = details;
+            this.clientCertificateRejection = null;
+            const readable = `The server at ${opts.url} presented a certificate that is not trusted (subject ${details.subject}, SHA-1 ${details.thumbprint}). Review it and trust it to connect.`;
+            return { error: new Error(`[untrusted-server-certificate] ${readable}`), readable };
+        }
+        if (der && trustStatus === "Good") {
+            // trusted, but maybe not valid (expired, not yet valid, revoked, ...): that is a server-side fix too
+            let status = "Good";
+            try { status = await cm.verifyCertificate(der); } catch (_) { status = "Good"; }
+            if (status !== "Good" && !serverRefusedUs) {
+                const details = this.certificateDetails(der);
+                const readable = `The server at ${opts.url} uses a certificate that is trusted but not valid (${status}; subject ${details.subject}, valid ${details.validFrom} to ${details.validTo}). The server needs a new certificate.`;
+                return { error: new Error(readable), readable };
+            }
+        }
+        if (!der && !serverRefusedUs) {
+            const readable = `The server at ${opts.url} presented a certificate that is not trusted, and its details could not be read. Check the address and try again.`;
+            this.rejectedServerCertificate = null;
+            return { error: new Error(`[untrusted-server-certificate] ${readable}`), readable };
+        }
+        // The server refused this client's application certificate.
+        this.rejectedServerCertificate = null;
+        const own = this.clientCertificateDetails(client);
+        const ownServer = !!der && this.isOwnServerCertificate(der);
+        this.clientCertificateRejection = { url: opts.url, ownServer, ...(own || {}) };
+        const who = own ? `(subject ${own.subject}, SHA-1 ${own.thumbprint})` : "";
+        const how = ownServer
+            ? "On this simulator: Certificates → Server application PKI → Rejected → Trust, then connect again."
+            : "Ask the server's administrator to trust it (servers usually list it under their rejected certificates), then connect again.";
+        const readable = `The server at ${opts.url} refused this client's application certificate ${who}. The server has to trust it first. ${how}`.replace(/\s+/g, " ");
+        return { error: new Error(`[client-certificate-rejected] ${readable}`), readable };
+    }
+
+    // Details of this client's own application certificate (what the server has to trust), or null.
+    clientCertificateDetails(client) {
+        try {
+            let der = client && typeof client.getCertificate === "function" ? client.getCertificate() : null;
+            if (!der || !der.length) {
+                const file = (client && client.certificateFile) || path.join(this.dataDir, "pki", "client", "own", "certs", "client_certificate.pem");
+                der = Buffer.from(new crypto.X509Certificate(fs.readFileSync(file)).raw);
+            }
+            return this.certificateDetails(Buffer.from(der));
+        } catch (_) {
+            return null;
+        }
+    }
+
+    // true when `der` is this simulator's own server certificate (same data directory).
+    isOwnServerCertificate(der) {
+        try {
+            const want = new crypto.X509Certificate(der).fingerprint256;
+            const dir = path.join(this.dataDir, "pki", "server", "own", "certs");
+            if (!fs.existsSync(dir)) return false;
+            return fs.readdirSync(dir).some((f) => {
+                if (!/\.(pem|der)$/i.test(f)) return false;
+                try { return new crypto.X509Certificate(fs.readFileSync(path.join(dir, f))).fingerprint256 === want; } catch (_) { return false; }
+            });
+        } catch (_) {
+            return false;
+        }
+    }
+
+    // Details of the last connect that failed because the SERVER refused this client's certificate, or null:
+    // { url, ownServer, subject, issuer, thumbprint, thumbprint256, validFrom, validTo, der (base64) }.
+    // `ownServer` is true when the server is this simulator's own server (so the app can offer to open
+    // Certificates, or trust the client directly with ServerEngine.trustClientCertificate(der)).
+    lastClientCertificateRejection() {
+        return this.clientCertificateRejection;
     }
 
     makeIdentity(opts, client) {

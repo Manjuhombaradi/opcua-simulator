@@ -68,10 +68,15 @@ function createDefaultProject() {
             securityPolicies: ["None", "Basic256Sha256", "Aes128_Sha256_RsaOaep", "Aes256_Sha256_RsaPss"],
             securityModes: ["None", "Sign", "SignAndEncrypt"],
             allowAnonymous: true,
+            // what anonymous clients may do: "readwrite" (demo default) or "readonly" (secure preset).
+            // Named roles (Operator/Engineer/.../Admin) may always write and call; Observer is read-only (SS-03).
+            anonymousAccess: "readwrite",
             allowUsername: true,
             allowCertificate: true,
             users: DEFAULT_USERS.map((u) => ({ ...u })),
             autoAcceptCertificates: true,
+            // which network interfaces the server listens on: "all" (default) or "localhost" (loopback only) (EG-2/SS-02)
+            listenAddress: "all",
             maxSessions: 100,
             maxSubscriptions: 1000,
             maxConnectionsPerEndpoint: 100,

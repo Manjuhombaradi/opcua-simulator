@@ -2,7 +2,7 @@
   "name": "opcua-simulator",
   "productName": "OPC UA Simulator",
   "desktopName": "opcua-simulator.desktop",
-  "version": "1.0.0",
+  "version": "1.0.1",
   "description": "Desktop OPC UA server simulator with built-in client for testing OPC UA applications",
   "main": "src/main/main.js",
   "engines": {
@@ -31,6 +31,15 @@
       "package.json"
     ],
     "afterPack": "./build/afterPack.js",
+    "electronFuses": {
+      "runAsNode": true,
+      "enableCookieEncryption": true,
+      "enableNodeOptionsEnvironmentVariable": false,
+      "enableNodeCliInspectArguments": false,
+      "enableEmbeddedAsarIntegrityValidation": true,
+      "onlyLoadAppFromAsar": true,
+      "resetAdHocDarwinSignature": true
+    },
     "toolsets": {
       "appimage": "1.0.3"
     },
@@ -142,7 +151,7 @@
       "category": "Development",
       "synopsis": "OPC UA server simulator and test client",
       "description": "Desktop OPC UA server simulator with a built-in client for testing OPC UA applications.",
-      "maintainer": "OPC UA Simulator <noreply@opcua-simulator.local>"
+      "maintainer": "Manjunagouda Hombaradi <manjuhombaradi@gmail.com>"
     },
     "deb": {
       "depends": [
@@ -160,20 +169,23 @@
         "libx11-xcb1"
       ],
       "appArmorProfile": "build/linux/apparmor-profile.tpl"
-    }
+    },
+    "copyright": "Copyright © 2026 Manjunagouda Hombaradi"
   },
   "license": "MIT",
   "dependencies": {
+    "@jitl/quickjs-wasmfile-release-sync": "^0.32.0",
     "node-opcua": "^2.187.12",
-    "node-opcua-crypto": "^6.2.3"
+    "node-opcua-crypto": "^6.2.3",
+    "quickjs-emscripten-core": "^0.32.0"
   },
   "devDependencies": {
     "electron": "^45.0.0",
     "electron-builder": "^26.15.3"
   },
   "author": {
-    "name": "OPC UA Simulator",
-    "email": "noreply@opcua-simulator.local"
+    "name": "Manjunagouda Hombaradi",
+    "email": "manjuhombaradi@gmail.com"
   },
   "homepage": "https://github.com/Manjuhombaradi/opcua-simulator",
   "repository": {

@@ -16,6 +16,12 @@ const App = {
     unmount: null,
     clientPrefillUrl: null,
     starting: null, // in-flight startServer() promise
+    // Method scripts of the current project were written or approved by the user (templates, designer edits, "Trust").
+    // Scripts of an opened project file are not trusted until the user reviewed them (see scriptsDialog).
+    scriptsTrusted: false,
+    scriptsDisabled: false, // the user chose "Start with scripts disabled" for this project
+    runningSecurity: null, // { warnings, scriptsDisabled } of the running server
+    dismissedWarnings: new Set(), // dashboard warnings hidden for this session
 
     on(event, cb) {
         (this.listeners[event] = this.listeners[event] || []).push(cb);
@@ -33,9 +39,12 @@ const App = {
     },
 
     // ------------------------------------------------------------ project
-    setProject(project, path) {
+    // scriptsTrusted: true for templates; for a project file whatever main reported (scripts trusted on this computer)
+    setProject(project, path, { scriptsTrusted = false } = {}) {
         this.project = project;
         this.projectPath = path || null;
+        this.scriptsTrusted = !!scriptsTrusted;
+        this.scriptsDisabled = false;
         this.dirty = false;
         this.changedSinceStart = this.serverStatus.state === "running";
         Designer.selectedId = null;
@@ -52,11 +61,13 @@ const App = {
         this.autosave();
     },
     // The renderer owns the project file path; main only stores what it is given.
-    autosave: debounce(() => { api.app("autosave", App.project, App.projectPath, App.dirty).catch(() => {}); }, 800),
+    autosave: debounce(() => { api.app("autosave", App.project, App.projectPath, App.dirty, App.scriptsTrusted).catch(() => {}); }, 800),
 
     async save(saveAs = false) {
         const file = await attempt(() => api.app("saveProject", this.project, saveAs, this.projectPath));
         if (file) {
+            // scripts the user wrote stay trusted when this file is opened again on this computer
+            if (this.scriptsTrusted) await api.app("trustProjectScripts", this.project).catch(() => {});
             this.projectPath = file;
             this.dirty = false;
             this.refreshChrome();
@@ -71,11 +82,41 @@ const App = {
     async openProject(file) {
         if (!(await this.confirmDiscard())) return;
         const r = await attempt(() => (file ? api.app("openProjectFile", file) : api.app("openProject")));
-        if (r) {
-            this.setProject(r.project, r.path);
+        if (r && (await this.reviewOpenedProject(r))) {
+            this.setProject(r.project, r.path, { scriptsTrusted: r.scriptsTrusted });
+            if (r.securePresetApplied) this.markDirty();
             toast(`Opened ${r.path}`, "success");
             if (this.serverStatus.state === "running") toast("Restart the server to serve the opened project", "warn");
         }
+    },
+    // Shows the security warnings of a project file before it is used. Resolves true to open it (with
+    // r.securePresetApplied when the user chose the secure settings), false to cancel.
+    async reviewOpenedProject(r) {
+        const warnings = r.warnings || [];
+        if (!warnings.length && !(r.scriptCount && !r.scriptsTrusted)) return true;
+        const name = r.project?.name || "This project";
+        const choice = await modal({
+            title: "Check the project's security settings",
+            wide: true,
+            body: h("div", { class: "stack", style: { gap: "12px" } },
+                h("div", null, `“${name}” (${r.path}) comes with the settings below. Projects you receive from others decide what the server allows, so check them before you start the server.`),
+                warnings.length ? warningList(warnings) : null,
+                r.scriptCount && !r.scriptsTrusted
+                    ? h("div", { class: "notice" }, `${r.scriptCount === 1 ? "Its method script does" : `Its ${r.scriptCount} method scripts do`} not run until you have reviewed and trusted ${r.scriptCount === 1 ? "it" : "them"} — you are asked when you start the server.`)
+                    : null,
+                h("div", { class: "muted small" }, "“Open with secure settings” switches to encrypted endpoints, no anonymous login, rejects unknown client certificates and turns discovery off. You can change everything later in Configuration.")),
+            buttons: [
+                { label: "Cancel", value: false },
+                { label: "Open with secure settings", value: "secure" },
+                { label: "Open project", class: "primary", value: true }
+            ]
+        });
+        if (choice === "secure") {
+            applySecurePreset(r.project.server);
+            r.securePresetApplied = true;
+            return true;
+        }
+        return choice === true;
     },
     async menu(command) {
         switch (command) {
@@ -115,7 +156,7 @@ const App = {
         }
         return this.starting;
     },
-    async startServerNow({ quiet = false } = {}) {
+    async startServerNow({ quiet = false, allowScripts } = {}) {
         if (this.serverStatus.state === "running") return true;
         if (this.serverStatus.state === "starting") return false;
         const problems = Designer.validate(this.project.nodes);
@@ -126,13 +167,27 @@ const App = {
             if (!go) return false;
         }
         if (!(await this.ensurePortFree())) return false;
+        // scripts the user wrote in the designer (or of a template) are trusted on this computer
+        if (this.scriptsTrusted) await api.app("trustProjectScripts", this.project).catch(() => {});
+        const scriptsOn = allowScripts ?? !this.scriptsDisabled;
         try {
-            await api.server("start", this.project);
+            await api.server("start", this.project, { allowScripts: scriptsOn });
             this.changedSinceStart = false;
             this.refreshChrome();
             toast(`Server running — ${this.serverStatus.endpointUrls?.length || 0} endpoint URL(s) on port ${this.project.server.port}`, "success");
+            if (!scriptsOn) toast("Method scripts are disabled for this run: calling a method returns BadUserAccessDenied.", "warn", 6000);
+            this.refreshRunningSecurity();
             return true;
         } catch (err) {
+            if (err.message.startsWith("[scripts-not-trusted]")) {
+                const choice = await this.scriptsDialog();
+                if (choice === "trust") return this.startServerNow({ quiet: true });
+                if (choice === "disable") {
+                    this.scriptsDisabled = true;
+                    return this.startServerNow({ quiet: true, allowScripts: false });
+                }
+                return false;
+            }
             const msg = err.message.replace(/ \[suggested-port:\d+\]$/, "");
             const suggested = Number((err.message.match(/\[suggested-port:(\d+)\]/) || [])[1]) || null;
             if (suggested) return (await this.portDialog(msg, suggested)) && this.startServerNow({ quiet: true });
@@ -169,6 +224,45 @@ const App = {
         this.markDirty();
         this.emit("project-changed", this.project);
         return true;
+    },
+    // Lists every method script of the project for review. Resolves "trust" (trusted and remembered on this computer),
+    // "disable" (start without scripts) or null (cancel). `forStart` false: review only (Dashboard, scripts disabled).
+    async scriptsDialog({ forStart = true } = {}) {
+        const info = await attempt(() => api.app("scriptTrust", this.project));
+        if (!info) return null;
+        const scripts = info.scripts || [];
+        const choice = await modal({
+            title: "Review the method scripts",
+            wide: true,
+            body: h("div", { class: "stack", style: { gap: "12px" } },
+                h("div", null, `This project contains ${plural(scripts.length, "method script")} that ${scripts.length === 1 ? "was" : "were"} not written or trusted on this computer — for example because the project file came from someone else. `,
+                    "A script runs when an OPC UA client calls its method. Scripts run in an isolated sandbox without access to files, the network or other programs, ",
+                    "but they can change simulated values. Trust them only if you know where the project comes from."),
+                h("div", { class: "script-list" }, scripts.map((sc) => h("div", null,
+                    h("div", { class: "script-path" }, sc.path),
+                    h("pre", { class: "script-code" }, sc.script)))),
+                h("div", { class: "muted small" }, "Your decision is remembered on this computer for exactly these scripts. If a script changes, you are asked again. Scripts you write yourself in Address Space are trusted automatically.")),
+            buttons: [
+                { label: "Cancel", value: null },
+                { label: forStart ? "Start with scripts disabled" : "Keep scripts disabled", value: "disable" },
+                { label: forStart ? "Trust and start" : "Trust scripts", class: "primary", onClick: async () => { await api.app("trustScripts", info.hash); return "trust"; } }
+            ]
+        });
+        if (choice === "trust") {
+            this.scriptsTrusted = true;
+            this.scriptsDisabled = false;
+            this.autosave();
+        }
+        return choice;
+    },
+    // Security warnings of the running server for the Dashboard.
+    async refreshRunningSecurity() {
+        try {
+            this.runningSecurity = this.serverStatus.state === "running" ? await api.app("runningSecurity") : null;
+        } catch (_) {
+            this.runningSecurity = null;
+        }
+        this.emit("running-security", this.runningSecurity);
     },
     async stopServer(delay = 0) {
         if (this.serverStatus.state !== "running") return;
@@ -266,6 +360,7 @@ const App = {
         this.settings = this.meta.settings;
         this.project = this.meta.project;
         this.projectPath = this.meta.projectPath || null;
+        this.scriptsTrusted = !!this.meta.scriptsTrusted;
         this.dirty = !!this.meta.dirty; // unsaved edits from the last session (kept in last-project.json)
         let theme = null;
         try { theme = localStorage.getItem("theme"); } catch (_) { /* ignore */ }
@@ -280,7 +375,9 @@ const App = {
         document.getElementById("btn-new").onclick = () => this.menu("new");
 
         api.on("server-status", (s) => {
+            const wasRunning = this.serverStatus.state === "running";
             this.serverStatus = s;
+            if ((s.state === "running") !== wasRunning) this.refreshRunningSecurity();
             this.refreshChrome();
             this.emit("server-status", s);
         });
@@ -303,9 +400,9 @@ const App = {
         api.on("open-file", (file) => this.openProject(file));
 
         this.serverStatus = await api.server("getStatus");
+        if (this.serverStatus.state === "running") this.refreshRunningSecurity();
         // a new window (or reload) while the server keeps running: say when it serves something else
-        this.changedSinceStart = this.serverStatus.state === "running" &&
-            (this.meta.projectSource === "file" || Number(this.serverStatus.port) !== Number(this.project.server.port));
+        this.changedSinceStart = this.serverStatus.state === "running" && Number(this.serverStatus.port) !== Number(this.project.server.port);
         this.refreshChrome();
         this.navigate("dashboard");
         if (this.meta.projectError) toast(`Could not open project: ${this.meta.projectError}`, "error");

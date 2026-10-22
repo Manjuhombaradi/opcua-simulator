@@ -1,5 +1,5 @@
 "use strict";
-/* Small DOM + UI helpers shared by all views. */
+/* Small DOM + UI helpers shared by all views. All text goes into text nodes (no HTML parsing of any value). */
 
 function h(tag, attrs, ...children) {
     const el = document.createElement(tag);
@@ -11,7 +11,6 @@ function h(tag, attrs, ...children) {
             else if (k.startsWith("on") && typeof v === "function") el.addEventListener(k.slice(2).toLowerCase(), v);
             else if (k === "value") el.value = v;
             else if (k === "checked") el.checked = !!v;
-            else if (k === "html") el.innerHTML = v;
             else if (k === "dataset") Object.assign(el.dataset, v);
             else el.setAttribute(k, v === true ? "" : v);
         }
@@ -126,6 +125,9 @@ function checkbox(label, checked, onChange) {
 
 function pad(n, w = 2) { return String(n).padStart(w, "0"); }
 
+// "1 method script", "3 method scripts"
+function plural(n, word) { return `${n} ${word}${n === 1 ? "" : "s"}`; }
+
 function fmtTime(iso, withDate = false) {
     if (!iso) return "—";
     const d = new Date(iso);
@@ -169,18 +171,75 @@ function debounce(fn, ms) {
     return (...args) => { clearTimeout(t); t = setTimeout(() => fn(...args), ms); };
 }
 
+// Through main: the page itself has no clipboard permission.
 function copyText(text) {
-    navigator.clipboard.writeText(text).then(() => toast(`Copied: ${text}`, "success", 1800));
+    api.app("copyText", String(text)).then(() => toast(`Copied: ${text}`, "success", 1800), (err) => toast(err.message, "error"));
+}
+
+// True when a user still has one of the well-known demo log-ins (admin/admin, operator/operator, viewer/viewer).
+function isDemoLogin(u) {
+    return (App.meta?.demoUsers || []).some((d) => d.username === u.username && d.password === u.password);
 }
 
 // Logins offered by a server configuration, e.g. "Anonymous, admin/admin · operator/operator".
+// Only the public demo passwords are shown; a password the user set appears as "name (own password)".
 function loginSummary(cfg) {
     const users = cfg.allowUsername ? (cfg.users || []).filter((u) => u.username) : [];
     const parts = [];
-    if (cfg.allowAnonymous) parts.push("Anonymous");
-    if (users.length) parts.push(users.slice(0, 4).map((u) => `${u.username}/${u.password}`).join(" · ") + (users.length > 4 ? ` · +${users.length - 4} more` : ""));
+    if (cfg.allowAnonymous) parts.push(cfg.anonymousAccess === "readonly" ? "Anonymous (read only)" : "Anonymous");
+    if (users.length) parts.push(users.slice(0, 4).map((u) => (isDemoLogin(u) ? `${u.username}/${u.password}` : `${u.username} (own password)`)).join(" · ") + (users.length > 4 ? ` · +${users.length - 4} more` : ""));
     if (cfg.allowCertificate) parts.push("X509 certificate");
     return parts.join(", ") || "no login type enabled (see Configuration → User Authentication)";
+}
+
+// Password input, masked, with a show / hide button. `onInput(value)` runs on every change.
+function passwordInput(value, onInput, attrs = {}) {
+    const input = h("input", { type: "password", value: value ?? "", autocomplete: "off", spellcheck: "false", ...attrs });
+    if (onInput) input.addEventListener("input", () => onInput(input.value));
+    const toggle = h("button", { type: "button", class: "btn ghost icon small", title: "Show password", "aria-label": "Show password", disabled: attrs.disabled }, icon("eye"));
+    toggle.addEventListener("click", () => {
+        const show = input.type === "password";
+        input.type = show ? "text" : "password";
+        toggle.title = show ? "Hide password" : "Show password";
+        toggle.setAttribute("aria-label", toggle.title);
+        toggle.classList.toggle("active", show);
+    });
+    return h("span", { class: "password-field" }, input, toggle);
+}
+
+// A random password that is easy to type (no look-alike characters).
+function randomPassword(length = 16) {
+    const chars = "ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz23456789";
+    const bytes = crypto.getRandomValues(new Uint8Array(length));
+    return [...bytes].map((b) => chars[b % chars.length]).join("");
+}
+
+// The "Secure (for organisations)" preset (from the engine) applied to a server configuration.
+function applySecurePreset(cfg) {
+    for (const [k, v] of Object.entries(App.meta.securePreset || {})) cfg[k] = Array.isArray(v) ? [...v] : v;
+    return cfg;
+}
+// True when the server configuration has every setting of the secure preset.
+function matchesSecurePreset(cfg) {
+    const same = (a, b) => Array.isArray(a) && Array.isArray(b) && a.length === b.length && a.every((x) => b.includes(x));
+    const preset = App.meta.securePreset || {};
+    return Object.keys(preset).length > 0 && Object.entries(preset).every(([k, v]) => (Array.isArray(v) ? same(cfg[k] || [], v) : cfg[k] === v));
+}
+// What the secure preset changes, in words (shown before applying it).
+const SECURE_PRESET_TEXT = [
+    "Only signed and encrypted endpoints (Basic256Sha256, Aes128_Sha256_RsaOaep, Aes256_Sha256_RsaPss; Sign, SignAndEncrypt) — no SecurityPolicy None.",
+    "No anonymous login; clients log in with a user name and password or an X509 user certificate.",
+    "Unknown client certificates are rejected until you trust them in Certificates.",
+    "No registration with a Local Discovery Server and no built-in discovery server."
+];
+
+// List of security warnings [{ text, level }] (or strings).
+function warningList(warnings) {
+    return h("ul", { class: "warning-list" }, (warnings || []).map((w) => {
+        const text = typeof w === "string" ? w : w.text;
+        const level = typeof w === "string" ? "warn" : w.level || "warn";
+        return h("li", { class: `warning-item ${level === "info" ? "info" : "warn"}` }, text);
+    }));
 }
 
 /*

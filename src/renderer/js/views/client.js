@@ -127,14 +127,19 @@ const ClientView = {
             h("div", { class: "row wrap" },
                 field("Security", sec),
                 field("User identity", auth),
-                c.authType === "UserName" ? [field("Username", bind("username", { disabled: isConn, style: { width: "140px" } })), field("Password", bind("password", { type: "password", disabled: isConn, style: { width: "140px" } }))] : null,
+                c.authType === "UserName" ? [field("Username", bind("username", { disabled: isConn, style: { width: "140px" } })),
+                    field("Password", passwordInput(c.password, (v) => { c.password = v; }, { disabled: isConn, style: { width: "140px" } }))] : null,
                 c.authType === "Certificate" ? field("Certificate & key (default: client app certificate)", h("div", { class: "row" }, pickBtn("certFile", "Certificate (.pem/.der)", ["pem", "der", "crt"]), pickBtn("keyFile", "Private key (.pem)", ["pem", "key"]),
                     c.certFile || c.keyFile ? h("button", { class: "btn small ghost", disabled: isConn, onclick: () => { c.certFile = c.keyFile = ""; this.renderConnection(); } }, "Reset") : null)) : null,
                 field("Publishing interval (ms)", h("div", { class: "row" }, bind("publishingInterval", { type: "number", min: 0, style: { width: "100px" } }),
                     isConn ? h("button", { class: "btn small", onclick: () => attempt(() => api.client("setPublishingInterval", c.publishingInterval), (v) => `Publishing interval: ${v} ms`) }, "Apply") : null)),
                 field("Session timeout (ms)", bind("sessionTimeout", { type: "number", min: 1000, disabled: isConn, style: { width: "110px" } })),
                 h("div", { style: { alignSelf: "flex-end", paddingBottom: "6px" } }, checkbox("Auto reconnect", c.autoReconnect, (v) => { c.autoReconnect = v; })),
-                App.clientStatus.error && !isConn ? h("span", { class: "badge bad", style: { alignSelf: "flex-end", whiteSpace: "normal" } }, App.clientStatus.error) : null)));
+                App.clientStatus.error && !isConn ? h("span", { class: "badge bad", style: { alignSelf: "flex-end", whiteSpace: "normal" } }, App.clientStatus.error.replace(/^\[untrusted-server-certificate\]\s*/, "")) : null),
+            // a password over an unsecured channel: say what protects it (and what does not)
+            c.authType === "UserName" && c.securityMode === "None" && !isConn
+                ? h("div", { class: "hint" }, "Security None: the connection is not signed or encrypted and the server's certificate is not checked. Use a Sign & Encrypt endpoint to send the password only to a server you trust.")
+                : null));
     },
 
     async discover() {
@@ -161,12 +166,54 @@ const ClientView = {
         const c = this.conn;
         this.recentUrls = [c.url, ...this.recentUrls.filter((u) => u !== c.url)].slice(0, 10);
         try { localStorage.setItem("recentUrls", JSON.stringify(this.recentUrls)); } catch (_) { /* ignore */ }
-        const ok = await attempt(() => api.client("connect", { ...c }), "Connected");
-        if (ok === undefined) { this.renderConnection(); return; }
+        try {
+            await api.client("connect", { ...c });
+        } catch (err) {
+            this.renderConnection();
+            // unknown server certificate: show it and let the user decide (no log-in was sent to the server yet)
+            if (String(err.message).startsWith("[untrusted-server-certificate]")) {
+                if (await this.trustServerDialog(err.message)) return this.connect();
+                return;
+            }
+            toast(err.message || String(err), "error");
+            return;
+        }
+        toast("Connected", "success");
         this.events = [];
         this.children.clear();
         await attempt(() => api.client("monitorEvents", "ns=0;i=2253"));
         this.renderAll();
+    },
+
+    // Shows the server certificate the client refused. Resolves true when the user trusted it (then connect again).
+    async trustServerDialog(message) {
+        const cert = await api.client("lastRejectedServerCertificate").catch(() => null);
+        const text = String(message).replace(/^\[untrusted-server-certificate\]\s*/, "");
+        if (!cert) {
+            toast(text || "The server certificate is not trusted. Trust it in Certificates → Client application PKI → Rejected.", "error");
+            return false;
+        }
+        const day = (d) => (d ? fmtTime(d, true).slice(0, 10) : "—");
+        const colons = (hex) => String(hex || "").toUpperCase().replace(/(..)(?!$)/g, "$1:");
+        return modal({
+            title: "Unknown server certificate",
+            wide: true,
+            body: h("div", { class: "stack", style: { gap: "12px" } },
+                h("div", null, `The server at ${this.conn.url} presented a certificate this computer does not trust yet. The connection was stopped before any log-in or data was sent. `,
+                    "Trust it only if it belongs to the server you meant to reach — if possible, compare the thumbprint with the one shown on that server. ",
+                    "An unexpected certificate can mean that someone is intercepting the connection."),
+                h("div", { class: "cert-facts" },
+                    h("div", null, "Subject"), h("div", null, cert.subject || "—"),
+                    h("div", null, "Issuer"), h("div", null, cert.issuer || "—"),
+                    cert.thumbprint256 ? [h("div", null, "SHA-256"), h("div", null, colons(cert.thumbprint256))] : null,
+                    h("div", null, "Thumbprint (SHA-1)"), h("div", null, colons(cert.thumbprint) || "—"),
+                    h("div", null, "Valid"), h("div", null, `${day(cert.validFrom)} to ${day(cert.validTo)}`)),
+                h("div", { class: "muted small" }, "Trusted certificates are kept in Certificates → Client application PKI → Trusted, where you can remove them again.")),
+            buttons: [
+                { label: "Cancel", value: false },
+                { label: "Trust and connect", class: "primary", onClick: async () => { await api.client("trustServerCertificate", cert.der); return true; } }
+            ]
+        }).then((r) => r === true);
     },
 
     // ------------------------------------------------------------ tree

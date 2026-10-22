@@ -14,7 +14,7 @@ const Dashboard = {
             render();
         };
         const timer = setInterval(poll, 2000);
-        const offs = [App.on("server-status", render), App.on("start-busy", render), App.on("project-changed", render)];
+        const offs = [App.on("server-status", render), App.on("start-busy", render), App.on("project-changed", render), App.on("running-security", render)];
         return () => { clearInterval(timer); offs.forEach((off) => off()); };
     },
 
@@ -65,6 +65,9 @@ const Dashboard = {
             return;
         }
 
+        // ---- security warnings of the running configuration (can be hidden for this session)
+        this.renderSecurity(root);
+
         // ---- endpoints (running)
         const urls = st.endpointUrls || [];
         const isIp = (u) => /^opc\.tcp:\/\/\d+\.\d+\.\d+\.\d+[:/]/.test(u);
@@ -84,11 +87,13 @@ const Dashboard = {
                 h("div", { class: "section-title" }, "From this machine"),
                 urlRow(local),
                 h("div", { class: "section-title", style: { marginTop: "12px" } }, "From other machines / VMs"),
-                remote.length ? remote.map((u) => urlRow(u)) : h("div", { class: "muted small" }, cfg.advertiseIpAddresses
-                    ? "No IPv4 network address found on this machine — check the network adapter of the VM, or add a host name / advertised URL in Configuration."
-                    : "No network address advertised (enable “Advertise IP addresses” in Configuration)."),
-                named.map((u) => urlRow(u, "host name — works where it resolves via DNS")),
-                h("div", { class: "hint", style: { marginTop: "8px" } }, `Allow TCP port ${App.servedPort()} in the firewall of this machine for remote clients. See Help for VM network tips.`))));
+                this.localOnly()
+                    ? h("div", { class: "muted small" }, "The server listens on this computer only — other machines cannot connect. Change “Listen on” in Configuration → Startup & Network to allow them.")
+                    : [remote.length ? remote.map((u) => urlRow(u)) : h("div", { class: "muted small" }, cfg.advertiseIpAddresses
+                        ? "No IPv4 network address found on this machine — check the network adapter of the VM, or add a host name / advertised URL in Configuration."
+                        : "No network address advertised (enable “Advertise IP addresses” in Configuration)."),
+                    named.map((u) => urlRow(u, "host name — works where it resolves via DNS")),
+                    h("div", { class: "hint", style: { marginTop: "8px" } }, `Allow TCP port ${App.servedPort()} in the firewall of this machine for remote clients. See Help for VM network tips.`)])));
 
         // ---- stats
         const d = st.diagnostics || {};
@@ -140,6 +145,43 @@ const Dashboard = {
                             h("td", { class: "num" }, s.subscriptions),
                             h("td", null, fmtTime(s.created)),
                             h("td", { class: "actions" }, h("button", { class: "btn small", onclick: () => attempt(() => api.server("closeSession", s.id), "Session closed") }, "Close")))))))));
+    },
+
+    // listen address of the configuration the server runs with (it may run an older version of the project)
+    localOnly() {
+        const running = App.serverStatus.state === "running" && App.runningSecurity?.listenAddress;
+        return (running || App.project.server.listenAddress) === "localhost";
+    },
+
+    renderSecurity(root) {
+        const sec = App.runningSecurity;
+        if (!sec) return;
+        const warnings = (sec.warnings || []).filter((w) => !App.dismissedWarnings.has(w.text));
+        if (sec.scriptsDisabled) {
+            root.appendChild(h("div", { class: "notice warn row wrap" },
+                h("div", { style: { flex: 1, minWidth: "260px" } }, h("b", null, "Method scripts are disabled. "),
+                    "This project's scripts have not been trusted on this computer, so calling a method returns BadUserAccessDenied."),
+                h("button", { class: "btn small", onclick: async () => {
+                    if ((await App.scriptsDialog({ forStart: false })) === "trust") {
+                        toast("Scripts trusted — restarting the server to enable them", "success");
+                        await App.restartServer();
+                    }
+                } }, "Review scripts…")));
+        }
+        if (!warnings.length) return;
+        root.appendChild(h("div", { class: "card" },
+            h("div", { class: "card-head" }, h("h2", null, `Security warnings (${warnings.length})`),
+                h("span", { class: "muted small" }, "Fine for a test lab; review them before other machines can reach this server")),
+            h("div", { class: "card-body stack", style: { gap: "10px" } },
+                warningList(warnings),
+                h("div", { class: "row wrap" },
+                    h("button", { class: "btn small primary", onclick: () => App.navigate("config") }, "⚙ Review in Configuration"),
+                    matchesSecurePreset(App.project.server) ? null : h("span", { class: "muted small" }, "Configuration → Security has a one-click secure preset for organisations."),
+                    h("span", { class: "spacer" }),
+                    h("button", { class: "btn small ghost", title: "Hide these warnings until the application is restarted", onclick: () => {
+                        warnings.forEach((w) => App.dismissedWarnings.add(w.text));
+                        this.render(root, App.serverStatus);
+                    } }, "Dismiss")))));
     },
 
     async shutdownDialog() {
