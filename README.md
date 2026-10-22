@@ -108,7 +108,7 @@ X509 user certificates are never trusted automatically: trust them in **Certific
 | Data types | All 20 built-in scalar types plus arrays; AnalogItemType with EURange and EngineeringUnits; access levels |
 | Simulation | Sine, triangle, sawtooth, square, random, random walk, ramp, counter, toggle, clock; pause per variable or for all |
 | Manual values | Set value, **StatusCode** and **source/server timestamps** (incl. picoseconds); set a StatusCode on many tags at once, e.g. to simulate a device going offline |
-| History | Historizing variables with HistoryRead |
+| History | HistoryRead of historizing variables: **raw values**, and **values at specific times** (ReadAtTimeDetails: the stored sample, or a value interpolated between samples, linear for numbers and stepped for other types, flagged `HistorianInterpolated`). **Event history** (ReadEventDetails) on the Server object and on folders / objects, with time range, maximum count, continuation points and EventFilter select / where clauses. Saved on disk, so history **survives restarts**; 100,000 values per variable and 100,000 events per object by default, configurable from 0 (off) to 1,000,000 (see [History](#history)) |
 | Alarms & Conditions | Exclusive / non-exclusive limit and off-normal alarms; enable, acknowledge, confirm, comment, ConditionRefresh, severity; one-click HH / H / Normal / L / LL triggers |
 | Events | Raise standard event types from any object, singly or in bursts |
 | Methods | Typed arguments, implemented in small JavaScript snippets |
@@ -118,7 +118,29 @@ X509 user certificates are never trusted automatically: trust them in **Certific
 
 The built-in **Client** connects to any OPC UA server, including this one. It does discovery, browse,
 attributes, write (with StatusCode and timestamps), subscriptions with deadbands and trend charts,
-events and alarms (acknowledge / confirm), method calls and history reads.
+events and alarms (acknowledge / confirm), method calls, and history reads: raw values, values at specific
+times (a list, or every N seconds) and event history.
+
+### History
+
+- Every value change of a variable with *Historizing* ticked, and every event that reaches the Server object or a
+  folder / object, is saved in `history/history.db` in the [data folder](#6-projects-settings-and-logs). The
+  history survives restarts of the server and of the app, so clients can read values and events recorded in earlier runs.
+- Three HistoryRead modes: *raw values* (ReadRawModifiedDetails, at most 10,000 values per node and call), *values at
+  specific times* (ReadAtTimeDetails, one value per requested time: the stored sample, or interpolated with the
+  `HistorianInterpolated` bit; `BadNoData` before the first or after the last stored value; up to 1000 times per node
+  and call), and *events* (ReadEventDetails). What does not fit in one call comes with continuation points.
+  Objects with an event history have the HistoryRead bit in their EventNotifier attribute.
+- Limits are in **Configuration → History**: values per variable and events per object, any whole number from 0
+  (off) to 1,000,000, e.g. 1000 (default 100,000). The oldest entries are removed first. A new limit applies at once
+  while the server runs; a lower one deletes the oldest entries beyond it (the app asks first). Headless:
+  `--value-history-size` / `--event-history-size` or `OPCUA_VALUE_HISTORY_SIZE` / `OPCUA_EVENT_HISTORY_SIZE`.
+- Each server stop stores one entry without value, status `BadDataLost`, per historizing variable (after a crash or
+  kill it is added at the next start). Raw reads return it; ReadAtTime inside that gap returns `BadDataLost` with
+  simple bounds (no value is interpolated across the stop), or an `UncertainDataSubNormal` value without them.
+- History is only deleted when you clear it: **Live Values** → history → *Clear this variable's history*,
+  **Alarms & Events** → *Event history* → *Clear*, **Configuration → History** → *Clear all value / event history*,
+  or `--clear-history` in headless mode.
 
 ---
 
@@ -151,7 +173,10 @@ the current settings (for example anonymous write access on all interfaces). A h
 | `--no-scripts` | `OPCUA_NO_SCRIPTS=1` | Do not run the project's method scripts (methods with a script return `BadUserAccessDenied`); use it for projects you did not write |
 | `--no-security` | `OPCUA_NO_SECURITY=1` | Offer SecurityPolicy None only (logins stay possible) |
 | `--regenerate-cert` | `OPCUA_REGENERATE_CERT=1` | Create a new server certificate for the current names / IPs |
-| `--data-dir <dir>` | `OPCUA_DATA_DIR` | Certificates and logs |
+| `--clear-history` | | Delete the saved value and event history once, before the server starts |
+| `--value-history-size <n>` | `OPCUA_VALUE_HISTORY_SIZE` | Values kept per historizing variable, 0 (off) to 1000000 (default: the project's, 100000) |
+| `--event-history-size <n>` | `OPCUA_EVENT_HISTORY_SIZE` | Events kept per object / the Server object, 0 (off) to 1000000 (default: the project's, 100000) |
+| `--data-dir <dir>` | `OPCUA_DATA_DIR` | Certificates, logs and the history database |
 | `--verbose` | `OPCUA_LOG_LEVEL=debug` | Debug logging |
 | `--help` | | All options |
 
@@ -160,6 +185,8 @@ the current settings (for example anonymous write access on all interfaces). A h
 ```bash
 docker build -t opcua-simulator .
 docker run -d -p 4840:4840 -e OPCUA_HOSTNAME=<ip-of-the-docker-host> opcua-simulator
+# keep only the latest 1000 values per variable
+docker run -d -p 4840:4840 -e OPCUA_VALUE_HISTORY_SIZE=1000 opcua-simulator
 # different host port: tell clients the real URL
 docker run -d -p 5000:4840 -e OPCUA_ADVERTISED_URL=opc.tcp://<host>:5000/UA/Simulator opcua-simulator
 # or
@@ -179,11 +206,12 @@ The image runs as an unprivileged user, and `docker-compose.yml` drops all Linux
   one opens it in the simulator.
 - Changes are kept automatically on this computer. **Save** updates the project file, which you can copy to
   another machine.
-- Data folder (settings, certificates, logs; Help → Open Data Folder):
+- Data folder (settings, certificates, logs, history database; Help → Open Data Folder):
   - Windows: `%APPDATA%\OPC UA Simulator`
   - macOS: `~/Library/Application Support/OPC UA Simulator`
   - Linux: `~/.config/OPC UA Simulator`
 - Logs: `logs/simulator.log` in the data folder, or `logs/headless.log` in headless mode.
+- History: `history/history.db` in the data folder (SQLite). It is kept until you clear it (see [History](#history)).
 - On macOS and Linux the data folder and the files the app writes (including saved projects) can only be
   read by your user account. Project files contain the server's user passwords: keep that in mind before
   you share one.
@@ -254,7 +282,7 @@ npm run dist:linux    # .deb, AppImage, .tar.gz (x64 and arm64)
 ```
 
 Each OS is best built on itself. The included GitHub Actions workflow (`.github/workflows/build.yml`)
-does this for all three. Push a tag such as `v1.0.1` to get a GitHub release with every installer,
+does this for all three. Push a tag such as `v1.1.0` to get a GitHub release with every installer,
 `SHA256SUMS.txt`, a CycloneDX SBOM and a build-provenance attestation. The workflow stops on known
 high/critical vulnerabilities in production dependencies (`npm audit`) and on packages with invalid
 registry signatures, and checks the Electron fuses of every build (`node scripts/verify-build.js`).

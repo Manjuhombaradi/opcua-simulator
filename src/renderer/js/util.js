@@ -143,6 +143,67 @@ function toLocalInput(date) {
     return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}T${pad(d.getHours())}:${pad(d.getMinutes())}:${pad(d.getSeconds())}.${pad(d.getMilliseconds(), 3)}`;
 }
 
+// Most times one "values at specific times" read may ask for (the client sends them in requests of 1000).
+const MAX_AT_TIMES = 10000;
+// Most stored values one raw history read returns (clientEngine.historyRead maxValues default).
+const RAW_READ_MAX = 100000;
+
+// Times typed one per line -> ISO strings. Accepts "2026-10-22 14:05:30.250" / "2026-10-22T14:05:30" (local time),
+// ISO times with Z or an offset, "14:05:30" (today, local), epoch milliseconds, and "-30s" / "-5m" / "+1h" (relative to now).
+function parseTimeList(text) {
+    const out = [];
+    const now = Date.now();
+    String(text || "").split(/\r?\n/).forEach((raw, i) => {
+        const line = raw.trim();
+        if (!line) return;
+        let d = null;
+        let m;
+        if ((m = line.match(/^([+-]\d+(?:\.\d+)?)\s*(ms|s|m|h|d)$/i))) {
+            d = new Date(now + Number(m[1]) * { ms: 1, s: 1e3, m: 60e3, h: 3600e3, d: 86400e3 }[m[2].toLowerCase()]);
+        } else if ((m = line.match(/^(\d{4})-(\d{2})-(\d{2})[ T](\d{2}):(\d{2})(?::(\d{2})(?:\.(\d{1,3}))?)?$/))) {
+            d = new Date(+m[1], +m[2] - 1, +m[3], +m[4], +m[5], +(m[6] || 0), +(m[7] || "0").padEnd(3, "0"));
+            // no silent roll-over (2026-02-30 -> March 2)
+            if (d.getMonth() !== +m[2] - 1 || d.getDate() !== +m[3] || d.getHours() !== +m[4] || d.getMinutes() !== +m[5]) d = null;
+        } else if ((m = line.match(/^(\d{1,2}):(\d{2})(?::(\d{2})(?:\.(\d{1,3}))?)?$/))) {
+            d = +m[1] < 24 && +m[2] < 60 && +(m[3] || 0) < 60 ? new Date(now) : null;
+            if (d) d.setHours(+m[1], +m[2], +(m[3] || 0), +(m[4] || "0").padEnd(3, "0"));
+        } else if (/^\d{11,}$/.test(line)) {
+            d = new Date(Number(line));
+        } else {
+            d = new Date(line);
+        }
+        if (!d || isNaN(d.getTime())) throw new Error(`Line ${i + 1}: “${line}” is not a time`);
+        out.push(d.toISOString());
+    });
+    if (!out.length) throw new Error("Enter at least one time");
+    if (out.length > MAX_AT_TIMES) throw new Error(`${out.length.toLocaleString()} times; at most ${MAX_AT_TIMES.toLocaleString()} per read`);
+    return out;
+}
+
+// Table of saved events [{ time, eventType, sourceName, severity, message, conditionName }] (event history views).
+function eventHistoryTable(events) {
+    const sev = (s) => (s === null || s === undefined || s === "" ? "" : h("span", { class: `badge ${s >= 700 ? "bad" : s >= 400 ? "warn" : "info"}` }, s));
+    return h("table", null,
+        h("thead", null, h("tr", null, ["Time", "Type", "Source", "Severity", "Message", "Condition"].map((x) => h("th", null, x)))),
+        h("tbody", null, events.map((e) => h("tr", null,
+            h("td", { class: "mono small", style: { whiteSpace: "nowrap" } }, fmtTime(e.time, true)),
+            h("td", { class: "small" }, e.eventType || ""),
+            h("td", null, e.sourceName || ""),
+            h("td", { class: "num" }, sev(e.severity)),
+            h("td", { class: "small", style: { maxWidth: "320px", overflowWrap: "anywhere" } }, e.message || ""),
+            h("td", { class: "small" }, e.conditionName || "")))));
+}
+
+// 1536 -> "1.5 KB"
+function fmtBytes(n) {
+    const v = Number(n) || 0;
+    if (v < 1024) return `${v} B`;
+    const units = ["KB", "MB", "GB", "TB"];
+    let x = v / 1024, i = 0;
+    while (x >= 1024 && i < units.length - 1) { x /= 1024; i++; }
+    return `${x < 10 ? x.toFixed(1) : Math.round(x)} ${units[i]}`;
+}
+
 function fmtDuration(ms) {
     const s = Math.floor(ms / 1000);
     const d = Math.floor(s / 86400), hh = Math.floor((s % 86400) / 3600), mm = Math.floor((s % 3600) / 60), ss = s % 60;
@@ -154,6 +215,20 @@ function fmtValue(v) {
     if (typeof v === "number") return Number.isInteger(v) ? String(v) : String(Math.round(v * 1e6) / 1e6);
     if (typeof v === "object") return JSON.stringify(v);
     return String(v);
+}
+
+// A stored history entry without value that marks a stop of the recording (BadDataLost: the server stopped, or a run
+// ended without stopping, e.g. a crash), not a value of the variable.
+function isHistoryGap(d) {
+    return !!d && (d.value === null || d.value === undefined) && /^BadDataLost/.test(String(d.statusCode || ""));
+}
+
+// Table cell content for the value of a history entry
+function historyValueCell(d) {
+    if (isHistoryGap(d)) return h("span", { class: "muted", title: "BadDataLost: no values were recorded from here until the next value (the server was stopped, or value history was off)" }, "— server stopped");
+    // a Bad entry without value (e.g. BadBoundNotFound)
+    if ((d.value === null || d.value === undefined) && /^Bad/.test(String(d.statusCode || ""))) return h("span", { class: "muted" }, "—");
+    return fmtValue(d.value);
 }
 
 function statusClass(name) {

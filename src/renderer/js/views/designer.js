@@ -392,8 +392,11 @@ const Designer = {
             field("Minimum sampling interval (ms)", numInput(v, "minimumSamplingInterval", { min: 0 }), "0 = exception based"),
             h("div", { class: "span-all" }, field("Initial value", valueInput, valueHint(v.dataType, v.valueRank)))));
 
+        const historySize = App.project?.server?.valueHistorySize ?? 100000; // Configuration → History
         el.appendChild(h("div", { class: "checks", style: { marginTop: "12px" } },
-            checkbox("Historizing (HistoryRead, stores up to 10 000 values)", v.historizing, (c) => { v.historizing = c; changed(); }),
+            checkbox(historySize > 0
+                ? `Historizing (HistoryRead, keeps the latest ${Number(historySize).toLocaleString()} values on this computer)`
+                : "Historizing (HistoryRead; value history is off in Configuration → History)", v.historizing, (c) => { v.historizing = c; changed(); }),
             V_NUMERIC.has(v.dataType) ? checkbox("AnalogItemType (EURange + EngineeringUnits)", v.analog, (c) => { v.analog = c; changed(); rerender(); }) : null));
         if (v.analog && V_NUMERIC.has(v.dataType)) {
             const unit = h("input", { value: v.unit || "", placeholder: "°C, bar, m/s …" });

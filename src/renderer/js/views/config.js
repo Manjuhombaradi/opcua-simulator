@@ -1,5 +1,7 @@
 "use strict";
 /* Server configuration form bound to App.project.server. */
+const HISTORY_SIZE_DEFAULT = 100000; // values per variable / events per object (project.js, historyStore.js)
+const HISTORY_SIZE_MAX = 1000000;
 const Config = {
     mount(view) {
         const changed = () => App.markDirty();
@@ -185,6 +187,8 @@ const Config = {
                     field("Min supported sample rate (ms)", text("minSupportedSampleRate", { type: "number", min: 0 }))),
                 flag("isAuditing", "Enable auditing (Server.Auditing = true, audit events are generated)")));
 
+            root.appendChild(this.historyCard(cfg, changed));
+
             const nodesetList = h("div", { class: "stack", style: { gap: "6px" } });
             (cfg.customNodesetFiles || []).forEach((f, i) => nodesetList.appendChild(h("div", { class: "row" },
                 h("span", { class: "code ellipsis", style: { flex: 1 } }, f),
@@ -212,7 +216,172 @@ const Config = {
                     "Must differ from the server port; standard LDS port is 4840. Registered servers are announced on the local network (multicast DNS).") : null));
         };
         render();
-        return App.on("project-changed", render);
+        const off = App.on("project-changed", render);
+        // the database grows while the server records: refresh its size now and then
+        const timer = setInterval(() => this.refreshHistoryStats(), 5000);
+        return () => { off(); clearInterval(timer); this.historyStatsEl = null; };
+    },
+
+    // ------------------------------------------------------------ history (saved on this computer)
+    historyCard(cfg, changed) {
+        // 0 = off, any whole number up to 1 000 000; projects from older versions have no value yet (default 100 000).
+        // A value is only taken on "change" (Enter / leaving the field), so typing "1500" or "0.5" key by key never
+        // saves an intermediate value or switches history off. Only an explicit 0 switches it off: an empty field,
+        // text, a fraction or a negative number is not taken (the last valid limit stays and is written back).
+        const presets = h("datalist", { id: "history-size-presets" }, [1000, 10000, 100000, 1000000].map((v) => h("option", { value: v }, v.toLocaleString())));
+        const limitInput = (key) => {
+            const el = h("input", { type: "number", min: 0, max: HISTORY_SIZE_MAX, step: 1, list: "history-size-presets", placeholder: "e.g. 1000", value: cfg[key] ?? HISTORY_SIZE_DEFAULT });
+            const parse = () => {
+                const text = el.value.trim(); // "" also for text a number field cannot hold
+                const n = Number(text);
+                if (text === "" || !Number.isInteger(n) || n < 0 || n > HISTORY_SIZE_MAX) return null;
+                return n;
+            };
+            let busy = false; // a confirmation or the apply call is open: a further "change" (focus moving) is not a new value
+            el.addEventListener("change", async () => {
+                if (busy) return;
+                const n = parse();
+                const current = cfg[key] ?? HISTORY_SIZE_DEFAULT;
+                if (n === null) {
+                    toast(`Enter a whole number from 0 (off) to ${HISTORY_SIZE_MAX.toLocaleString()}, e.g. 1000`, "warn");
+                    el.value = current;
+                } else if (n !== current) {
+                    busy = true;
+                    try { await this.applyHistoryLimit(cfg, key, n, el, changed); } finally { busy = false; }
+                } else el.value = current;
+            });
+            return el;
+        };
+        this.historyStatsEl = h("div", { class: "kv card", style: { boxShadow: "none" } });
+        const clearButton = (what) => h("button", { class: "btn small", onclick: () => this.clearHistoryDialog(what) }, icon("trash"), what === "values" ? "Clear all value history…" : "Clear all event history…");
+        const card = h("div", { class: "card" },
+            h("div", { class: "card-head" }, h("h2", null, "History"), h("span", { class: "muted small" }, "Values and events for HistoryRead, saved on this computer")),
+            h("div", { class: "card-body stack" },
+                presets,
+                h("div", { class: "form-grid" },
+                    field("Values kept per variable", limitInput("valueHistorySize"), "For each variable with “Historizing”. The oldest values are removed beyond this. Any whole number, e.g. 1000; 0 = off, at most 1 000 000."),
+                    field("Events kept per object", limitInput("eventHistorySize"), "For the Server object and each folder / object (event notifier). The oldest events are removed beyond this. 0 = off, at most 1 000 000.")),
+                h("div", { class: "hint" }, "History is kept in a database file in the data folder, not in the project file, and survives restarts of the server and of the application. It is only deleted when you clear it here, in Live Values (one variable), in Alarms & Events, with the headless option --clear-history, or when you lower a limit. ",
+                    "A new limit applies at once while the server runs (a lower one deletes the oldest values beyond it); otherwise on the next server start."),
+                this.historyStatsEl,
+                h("div", { class: "row wrap" }, clearButton("values"), clearButton("events"),
+                    h("button", { class: "btn small", onclick: () => this.refreshHistoryStats() }, "↻ Refresh"),
+                    h("button", { class: "btn small", title: "Show the history database in the file manager", onclick: async () => {
+                        const stats = await attempt(() => api.server("getHistoryStats"));
+                        if (stats?.file) attempt(() => api.app("showItem", stats.file));
+                    } }, icon("folder"), "Show database file"))));
+        this.refreshHistoryStats();
+        return card;
+    },
+
+    // A new history limit from the field: a lower one that deletes stored entries is confirmed first; while the server
+    // runs it is applied at once (ServerEngine.setHistoryLimits), otherwise on the next start.
+    async applyHistoryLimit(cfg, key, n, el, changed) {
+        const values = key === "valueHistorySize";
+        const unit = values ? "values per variable" : "events per object";
+        const current = cfg[key] ?? HISTORY_SIZE_DEFAULT;
+        const running = App.serverStatus.state === "running";
+        if (n > 0 && (current === 0 || n < current)) {
+            // the most entries of one variable / object when the store reports it, else all of them (an upper bound)
+            const stats = await api.server("getHistoryStats").catch(() => null);
+            const most = values ? stats?.maxValuesPerVariable ?? stats?.values : stats?.maxEventsPerNotifier ?? stats?.events;
+            if (Number(most) > n) {
+                const ok = await confirmDialog("Lower the history limit",
+                    h("div", { class: "stack", style: { gap: "8px" } },
+                        h("div", null, `Keep only the newest ${n.toLocaleString()} ${unit}? Older ${values ? "values" : "events"} are deleted.`),
+                        h("div", { class: "muted small" }, running
+                            ? "This cannot be undone. OPC UA clients can then no longer read the deleted entries with HistoryRead."
+                            : "They are deleted when the server starts next. This cannot be undone.")),
+                    "Lower the limit", true);
+                if (!ok) { el.value = cfg[key] ?? HISTORY_SIZE_DEFAULT; return; }
+            }
+        }
+        const restartPending = App.changedSinceStart;
+        cfg[key] = n;
+        el.value = n;
+        changed();
+        const what = n === 0 ? `${values ? "Value" : "Event"} history off` : `History limit set to ${n.toLocaleString()} ${unit}`;
+        if (!running) {
+            toast(`${what}: applies on the next server start`, "success");
+            this.refreshHistoryStats();
+            return;
+        }
+        let r;
+        try {
+            r = await api.server("setHistoryLimits", {
+                valueHistorySize: cfg.valueHistorySize ?? HISTORY_SIZE_DEFAULT,
+                eventHistorySize: cfg.eventHistorySize ?? HISTORY_SIZE_DEFAULT
+            });
+        } catch (err) {
+            toast(`${what}: applies on the next server start (${err.message})`, "warn", 6000);
+            this.refreshHistoryStats();
+            return;
+        }
+        if (r?.restartRequired) toast(`${what}: applies on the next server start`, "info", 5000);
+        else {
+            // applied to the running server: no restart needed for it
+            App.changedSinceStart = restartPending;
+            App.refreshChrome();
+            toast(n === 0
+                ? `History limit applied: no new ${values ? "values" : "events"} are recorded (saved ones are kept)`
+                : `History limit applied: keeps ${n.toLocaleString()} ${unit}${n < current ? ` (older ${values ? "values" : "events"} removed)` : ""}`, "success", 5000);
+        }
+        this.refreshHistoryStats(r?.stats);
+    },
+
+    async refreshHistoryStats(given) {
+        const el = this.historyStatsEl;
+        if (!el) return;
+        let stats = given || null, error = null;
+        if (!stats) {
+            try { stats = await api.server("getHistoryStats"); } catch (err) { error = err.message; }
+        }
+        if (this.historyStatsEl !== el) return;
+        const n = (x) => (x === undefined || x === null ? "—" : Number(x).toLocaleString());
+        clear(el);
+        if (!stats) {
+            el.appendChild(h("div", null, "Database"));
+            el.appendChild(h("div", null, error ? `not available (${error})` : "—"));
+            return;
+        }
+        if (stats.error) {
+            const running = App.serverStatus.state === "running";
+            // inMemory: the running server keeps this run's value history in memory only and records no events (event
+            // history needs the database); otherwise it recorded into the file, which now fails, so new entries are
+            // lost. While stopped the next start falls back to memory.
+            const effect = !running ? "When the server starts, it keeps the value history of that run in memory only (lost when it stops); events are not recorded."
+                : stats.inMemory ? "The running server keeps its value history in memory only until it stops; events are not recorded."
+                    : "New values and events are not saved.";
+            el.append(h("div", null, "Problem"), h("div", { style: { color: "var(--bad)" } },
+                `The history database cannot be used (${stats.error}). ${effect}${stats.hint ? ` ${stats.hint}` : ""}`));
+        }
+        // with a problem the counts are those of the database file, not what the running server holds in memory
+        const inFile = stats.error ? " in the file" : "";
+        el.append(
+            h("div", null, "Database file"), h("div", null, stats.file || "—"),
+            h("div", null, "Size on disk"), h("div", null, fmtBytes(stats.sizeBytes)),
+            h("div", null, `Saved values${inFile}`), h("div", null, n(stats.values)),
+            h("div", null, `Saved events${inFile}`), h("div", null, n(stats.events)));
+        if (stats.error && stats.inMemory && App.serverStatus.state === "running") {
+            el.append(h("div", null, "Values in memory"), h("div", { class: "muted" }, "kept by the running server, not counted here; lost when it stops"));
+        }
+        if (stats.pending) el.append(h("div", null, "Waiting to be saved"), h("div", null, `${n(stats.pending)} (another program holds the database lock)`));
+    },
+
+    async clearHistoryDialog(what) {
+        const values = what === "values";
+        const ok = await confirmDialog(values ? "Clear all value history" : "Clear all event history",
+            h("div", { class: "stack", style: { gap: "8px" } },
+                h("div", null, values
+                    ? "Delete the saved values of every historizing variable from the history database on this computer?"
+                    : "Delete every saved event (Server object, folders and objects) from the history database on this computer?"),
+                h("div", { class: "muted small" }, `This cannot be undone. OPC UA clients can then no longer read ${values ? "these values" : "these events"} with HistoryRead. While the server runs, new ${values ? "values" : "events"} are recorded again.`)),
+            values ? "Clear all value history" : "Clear all event history", true);
+        if (!ok) return;
+        const r = await attempt(() => api.server(values ? "clearHistory" : "clearEventHistory", { all: true }));
+        if (r?.replaced) toast("The damaged history database was replaced by a new, empty one: all saved values and all saved events were removed", "warn", 8000);
+        else if (r) toast(values ? "All value history cleared" : "All event history cleared", "success");
+        this.refreshHistoryStats(r);
     },
 
     async applySecure(changed, render) {

@@ -9,15 +9,22 @@ const Alarms = {
                 h("div", { class: "big" }, "⚠"), "Start the server to work with alarms and events.")));
             return App.on("server-status", (s) => { if (s.state === "running") App.navigate("alarms"); });
         }
+        this.lastKey = null; // a new, empty table: the first poll fills it even when the alarms did not change
         this.alarmBody = h("div", { class: "card-body flush table-wrap" });
         root.appendChild(h("div", { class: "card" },
             h("div", { class: "card-head" }, h("h2", null, "Alarms"), h("span", { class: "muted small" }, "Conditions defined in the Address Space designer")),
             this.alarmBody));
         root.appendChild(this.eventCard());
+        root.appendChild(this.historyCard());
         this.poll();
-        const timer = setInterval(() => this.poll(), 1000);
+        this.pollHistory();
+        let tick = 0;
+        const timer = setInterval(() => {
+            this.poll();
+            if (++tick % 2 === 0) this.pollHistory();
+        }, 1000);
         const off = App.on("server-status", (s) => { if (s.state !== "running") App.navigate("alarms"); });
-        return () => { clearInterval(timer); off(); };
+        return () => { clearInterval(timer); off(); this.historyBody = null; };
     },
 
     async poll() {
@@ -98,6 +105,86 @@ const Alarms = {
             buttons: [{ label: "Cancel", value: false }, { label: "Apply", class: "primary", value: true }]
         });
         if (ok) { await attempt(() => api.server("alarmAction", a.id, "severity", String(input.value))); this.poll(); }
+    },
+
+    // ------------------------------------------------------------ event history (saved on this computer)
+    historyNotifier: "server",
+    historyLimit: 200,
+
+    historyCard() {
+        this.historyKey = null; // a new, empty body: the next poll fills it even when the events did not change
+        const sources = [{ value: "server", label: "Server (ns=0;i=2253) — every event" }, ...Designer.allContainers().map((c) => ({ value: c.id, label: c.path }))];
+        if (!sources.some((x) => x.value === this.historyNotifier)) this.historyNotifier = "server";
+        const notifier = select(sources, this.historyNotifier);
+        notifier.addEventListener("change", () => { this.historyNotifier = notifier.value; this.historyKey = null; this.pollHistory(); });
+        const limit = select([50, 200, 1000].map((n) => ({ value: String(n), label: `Latest ${n}` })), String(this.historyLimit));
+        limit.addEventListener("change", () => { this.historyLimit = Number(limit.value); this.historyKey = null; this.pollHistory(); });
+        this.historyBody = h("div", { class: "card-body flush table-wrap", style: { maxHeight: "420px" } });
+        this.historyInfo = h("span", { class: "muted small" });
+        const size = App.project?.server?.eventHistorySize ?? 100000;
+        return h("div", { class: "card" },
+            h("div", { class: "card-head" }, h("h2", null, "Event history (saved on this computer)"),
+                h("span", { class: "muted small" }, size > 0
+                    ? `Kept across restarts, up to ${Number(size).toLocaleString()} events per object · clients read it with HistoryRead (events)`
+                    : "Off — set “Events per object” in Configuration → History")),
+            h("div", { class: "card-body", style: { paddingBottom: "10px" } },
+                h("div", { class: "row wrap" }, field("Events of", notifier), field("Show", limit),
+                    h("div", { class: "row", style: { alignSelf: "flex-end" } },
+                        h("button", { class: "btn small", onclick: () => { this.historyKey = null; this.pollHistory(); } }, "↻ Refresh"),
+                        h("button", { class: "btn small", onclick: () => this.clearHistoryDialog(sources.find((x) => x.value === this.historyNotifier)) }, icon("trash"), "Clear event history…")),
+                    h("span", { class: "spacer" }), this.historyInfo)),
+            this.historyBody);
+    },
+
+    async pollHistory() {
+        if (!this.historyBody) return;
+        const body = this.historyBody;
+        const notifier = this.historyNotifier, limit = this.historyLimit;
+        // an answer for another visit of the view, or for the object / limit chosen before, is dropped
+        const stale = () => this.historyBody !== body || this.historyNotifier !== notifier || this.historyLimit !== limit;
+        let events;
+        try {
+            events = await api.server("getEventHistory", { notifier, limit });
+        } catch (err) {
+            if (stale()) return;
+            this.historyKey = null;
+            this.historyInfo.textContent = "";
+            clear(body).appendChild(h("div", { class: "empty" }, `Event history is not available: ${err.message}`));
+            return;
+        }
+        if (stale()) return;
+        events = (events || []).slice().sort((a, b) => String(b.time).localeCompare(String(a.time))); // newest first
+        const key = JSON.stringify(events);
+        if (key === this.historyKey) return;
+        this.historyKey = key;
+        this.historyInfo.textContent = events.length ? `${events.length} latest event(s), newest first` : "";
+        clear(body);
+        if (!events.length) {
+            body.appendChild(h("div", { class: "empty" }, "No saved events yet. Raise an event above or trigger an alarm."));
+            return;
+        }
+        body.appendChild(eventHistoryTable(events));
+    },
+
+    async clearHistoryDialog(source) {
+        const label = source?.label?.replace(/ — every event$/, "") || "Server";
+        const choice = await modal({
+            title: "Clear event history",
+            body: h("div", { class: "stack", style: { gap: "8px" } },
+                h("div", null, "Delete saved events from the history database on this computer?"),
+                h("div", null, "An event is saved for its source object and for every folder above it up to the Server object, so “", h("b", null, label), " only” keeps the copies saved for the other objects."),
+                h("div", { class: "muted small" }, "This cannot be undone. OPC UA clients can then no longer read these events with HistoryRead. New events are recorded again from now on.")),
+            buttons: [
+                { label: "Cancel", value: null },
+                { label: `Clear ${label.length > 28 ? "this object" : label} only`, value: "one" },
+                { label: "Clear all event history", class: "danger", value: "all" }
+            ]
+        });
+        if (!choice) return;
+        const args = choice === "all" ? { all: true } : { notifier: this.historyNotifier };
+        await attempt(() => api.server("clearEventHistory", args), choice === "all" ? "All event history cleared" : `Event history of ${label} cleared`);
+        this.historyKey = null;
+        this.pollHistory();
     },
 
     eventCard() {

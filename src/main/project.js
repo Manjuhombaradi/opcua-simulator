@@ -2,6 +2,7 @@
 // Project templates, loading and normalisation (shared by the desktop app and the headless runner).
 const fs = require("fs");
 const { createDefaultProject, newId } = require("./defaultProject");
+const { historySize } = require("./historyStore");
 
 const PROJECT_EXTENSIONS = ["opcuasim", "json"];
 
@@ -58,6 +59,8 @@ function normalizeProject(project) {
     if (!Array.isArray(project.nodes)) throw new Error("Not a valid simulator project: \"nodes\" list is missing");
     const defaults = createDefaultProject().server;
     project.server = { ...defaults, ...(project.server || {}) };
+    // history capacities: whole numbers 0 .. 1 000 000 (anything else falls back to the default)
+    for (const key of ["valueHistorySize", "eventHistorySize"]) project.server[key] = historySize(project.server[key], defaults[key]);
     project.name = project.name || "Project";
     project.version = project.version || 1;
     return project;

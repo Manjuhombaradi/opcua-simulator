@@ -1,8 +1,8 @@
 # Security notes for OPC UA Simulator
 
 This document is for security teams and administrators who evaluate or deploy OPC UA Simulator. It
-describes version **1.0.1** (desktop app for Windows, macOS and Linux, headless mode and Docker image).
-Version 1.0.1 contains the fixes from an independent security review in October 2026.
+describes version **1.1.0** (desktop app for Windows, macOS and Linux, headless mode and Docker image).
+Version 1.1.0 contains the fixes from an independent security review in October 2026.
 
 **Short version**
 
@@ -42,7 +42,7 @@ This is the complete list of network activity.
 What the review measured (packet capture of all non-loopback traffic, fresh profile, no user action):
 the headless simulator and the Docker image produced **zero** packets (no DNS, no outbound TCP, no
 multicast). Version 1.0.0 of the desktop app downloaded the spell-check dictionary from
-`redirector.gvt1.com` (Google) on its first start; 1.0.1 turns the spell checker and the download off.
+`redirector.gvt1.com` (Google) on its first start; 1.1.0 turns the spell checker and the download off.
 We recommend that you verify this yourself with a firewall or packet capture.
 
 Headless mode on Linux and the Docker image start no Chromium at all (the packaged Linux app runs
@@ -69,6 +69,7 @@ Everything lives in one data folder:
 | `last-project.json` | Automatic copy of the open project (desktop), **including server user names and passwords**. |
 | `*.opcuasim` | Project files you save, wherever you save them. They contain the full configuration, including user names, **passwords** and method scripts. |
 | `logs/simulator.log`, `logs/headless.log` | Server start/stop, sessions (client application names, user names, client IP addresses), values written by clients, errors. Rotated at 5 MB, one older file kept. Control characters in log text (for example in names a client sends) are escaped and long text is cut, so a client cannot forge log lines. |
+| `history/history.db` (+ `-wal`, `-shm`) | Recorded value history of historizing variables and the event history of the Server object and project objects (by default up to 100 000 values per variable and 100 000 events per object; any limit from 0 = off to 1 000 000 in *Configuration → History*, or headless `--value-history-size` / `--event-history-size`). Kept across restarts; nothing is sent anywhere. Deleted only when you use *Clear …* in the app or start headless with `--clear-history` (or delete the folder). Event history contains event messages and source names, which can include values clients wrote. |
 | `pki/server` | The server's application certificate and **private key**, trusted / rejected client application certificates, imported CA certificates. |
 | `pki/user` | Trusted / rejected X.509 user certificates. |
 | `pki/client` | The built-in client's certificate and private key, trusted / rejected server certificates. |
@@ -77,7 +78,7 @@ Everything lives in one data folder:
 Protection:
 
 - **macOS / Linux**: the data folder is `0700` and the files the app writes (settings, project copies,
-  saved projects, logs, private keys) are `0600`, so other local users cannot read them. The Docker
+  saved projects, logs, history database, private keys) are `0600`, so other local users cannot read them. The Docker
   image's `/data` is owned by the unprivileged `node` user (uid 1000, group 0, no access for others).
 - **Windows**: the folder is inside your user profile and protected by its permissions.
 - The app does **not encrypt** passwords at rest: the OPC UA server has to compare them. Do not reuse
@@ -147,7 +148,7 @@ the Dashboard (and the headless banner prints warnings) whenever one of the risk
 
 ## Method scripts
 
-Methods can be implemented with small JavaScript snippets stored in the project. Since 1.0.1 they run in
+Methods can be implemented with small JavaScript snippets stored in the project. Since 1.1.0 they run in
 **QuickJS compiled to WebAssembly** (`quickjs-emscripten`), not in the app's own JavaScript engine:
 
 - The script sees only its `inputs` and three functions: `getValue(path)`, `setValue(path, value)` and
@@ -270,11 +271,11 @@ be used. Before you allow the start, check the file:
 1. **Checksum** — download `SHA256SUMS.txt` from the same release and run, in the download folder:
    - Linux: `sha256sum -c SHA256SUMS.txt --ignore-missing`
    - macOS: `shasum -a 256 -c SHA256SUMS.txt --ignore-missing`
-   - Windows (PowerShell): `Get-FileHash .\OPCUA-Simulator-Setup-1.0.1-x64.exe` and compare the hash
+   - Windows (PowerShell): `Get-FileHash .\OPCUA-Simulator-Setup-1.1.0-x64.exe` and compare the hash
      with the line in `SHA256SUMS.txt`.
 2. **Build provenance** — proves the file was built by this repository's GitHub Actions workflow from
    the tagged commit (Sigstore-signed attestation):
-   `gh attestation verify OPCUA-Simulator-Setup-1.0.1-x64.exe --repo Manjuhombaradi/opcua-simulator`
+   `gh attestation verify OPCUA-Simulator-Setup-1.1.0-x64.exe --repo Manjuhombaradi/opcua-simulator`
 3. **Allow-listing** — use hash rules with the values from `SHA256SUMS.txt` (they change with every
    release).
 

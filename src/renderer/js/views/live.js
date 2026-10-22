@@ -1,5 +1,6 @@
 "use strict";
 /* Live values: current value of every server variable, manual overrides (value, status, timestamps). */
+const LIVE_HISTORY_MAX = 10000; // values returned by ServerEngine.getHistory (the latest of the range)
 const Live = {
     filter: "",
     selected: new Set(),
@@ -243,18 +244,40 @@ const Live = {
             if (!values) return false;
             clear(out);
             if (!chart) chart = new TrendChart(chartHost);
-            chart.setPoints("h", v.path, values.map((d) => [d.sourceTimestamp, Array.isArray(d.value) ? d.value[0] : d.value]));
-            out.appendChild(h("div", { class: "muted small", style: { margin: "8px 0" } }, `${values.length} value(s)`));
+            chart.clearSeries();
+            // a stop marker (no value) breaks the line
+            chart.setPoints("h", v.path, values.map((d) => [d.sourceTimestamp, isHistoryGap(d) ? null : Array.isArray(d.value) ? d.value[0] : d.value]));
+            const stops = values.filter(isHistoryGap).length;
+            out.appendChild(h("div", { class: "muted small", style: { margin: "8px 0" } },
+                values.length >= LIVE_HISTORY_MAX ? `The latest ${LIVE_HISTORY_MAX.toLocaleString()} values of this range (choose an earlier end time for older ones)` : `${values.length.toLocaleString()} value(s)`,
+                stops ? ` · ${plural(stops, "gap")} where the server was stopped (no values recorded)` : "",
+                values.length > 500 ? " · the table shows the latest 500" : ""));
             out.appendChild(h("div", { class: "table-wrap", style: { maxHeight: "260px" } }, h("table", null,
                 h("thead", null, h("tr", null, h("th", null, "Source timestamp"), h("th", null, "Value"), h("th", null, "Status"))),
-                h("tbody", null, values.slice(-500).reverse().map((d) => h("tr", null, h("td", { class: "mono small" }, fmtTime(d.sourceTimestamp, true)), h("td", { class: "value" }, fmtValue(d.value)), h("td", null, statusBadge(d.statusCode))))))));
+                h("tbody", null, values.slice(-500).reverse().map((d) => h("tr", null, h("td", { class: "mono small" }, fmtTime(d.sourceTimestamp, true)), h("td", { class: "value" }, historyValueCell(d)), h("td", null, statusBadge(d.statusCode))))))));
             return false;
         };
+        const clearBtn = h("button", { class: "btn small", title: "Delete the saved values of this variable from the history database", onclick: async () => {
+            const ok = await confirmDialog("Clear this variable's history",
+                h("div", { class: "stack", style: { gap: "8px" } },
+                    h("div", null, `Delete every saved value of ${v.path} from the history database on this computer?`),
+                    h("div", { class: "muted small" }, "This cannot be undone. OPC UA clients can then no longer read these values with HistoryRead. New values are recorded again from now on.")),
+                "Clear history", true);
+            if (!ok) return;
+            const r = await attempt(() => api.server("clearHistory", { variableId: v.id }), `History of ${v.path} cleared`);
+            if (r !== undefined) load();
+        } }, icon("trash"), "Clear this variable's history");
+        const size = App.project?.server?.valueHistorySize ?? 100000;
         setTimeout(load, 50);
         await modal({
             title: `History · ${v.path}`,
             wide: true,
-            body: h("div", null, h("div", { class: "row" }, field("Start", start), field("End", end)), chartHost, out),
+            body: h("div", null,
+                h("div", { class: "row wrap" }, field("Start", start), field("End", end), h("span", { class: "spacer" }), h("div", { style: { alignSelf: "flex-end" } }, clearBtn)),
+                h("div", { class: "hint", style: { margin: "6px 0 4px" } }, size > 0
+                    ? `Saved on this computer and kept across restarts (the latest ${Number(size).toLocaleString()} values per variable; Configuration → History).`
+                    : "Value history is off (Configuration → History): no new values are recorded."),
+                chartHost, out),
             buttons: [{ label: "Read", class: "primary", onClick: load }, { label: "Close", value: null }]
         });
         if (chart) chart.destroy();

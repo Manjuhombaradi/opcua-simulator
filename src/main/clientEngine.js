@@ -30,7 +30,11 @@ const {
     ObjectTypeIds,
     MethodIds,
     ServerState,
-    ApplicationType
+    ApplicationType,
+    HistoryReadRequest,
+    ReadRawModifiedDetails,
+    ReadAtTimeDetails,
+    ReadEventDetails
 } = require("node-opcua");
 const { readCertificate, readPrivateKeyPEM } = require("node-opcua-crypto");
 const V = require("./valueUtils");
@@ -501,7 +505,11 @@ class ClientEngine extends EventEmitter {
             else if (name === "AccessLevelEx") display = String(raw);
             else if (name === "DataType") { display = `${await this.dataTypeName(raw)} (${raw.toString()})`; info.dataType = await this.builtInType(raw); info.dataTypeNodeId = raw.toString(); }
             else if (name === "ValueRank") { display = `${raw} (${{ "-3": "ScalarOrOneDimension", "-2": "Any", "-1": "Scalar", "0": "OneOrMoreDimensions", "1": "OneDimension" }[raw] || raw + " dimensions"})`; info.valueRank = raw; }
-            else if (name === "EventNotifier") display = `${raw} (${raw & 1 ? "SubscribeToEvents" : "None"})`;
+            else if (name === "EventNotifier") {
+                const flags = [[1, "SubscribeToEvents"], [4, "HistoryRead"], [8, "HistoryWrite"]].filter(([bit]) => raw & bit).map(([, n]) => n);
+                display = `${raw} (${flags.join(", ") || "None"})`;
+                info.eventNotifier = raw;
+            }
             else if (name === "MinimumSamplingInterval") display = `${raw} ms`;
             if (name === "NodeClass") info.nodeClass = NodeClass[raw];
             if (name === "UserAccessLevel") info.writable = !!(raw & 2);
@@ -706,13 +714,166 @@ class ClientEngine extends EventEmitter {
 
     // ---------------------------------------------------------------- history
 
-    async historyRead({ nodeId, startTime, endTime }) {
+    // HistoryRead with ReadRawModifiedDetails (raw values, with bounds). Reads pages of at most 10 000 values and
+    // follows continuation points until `maxValues` stored values; the bounding values at the start and end time
+    // (interpolated, a stored value outside the range, or BadBoundNotFound) are returned too but not counted.
+    async historyRead({ nodeId, startTime, endTime, maxValues = 100000 }) {
         this.requireSession();
         const start = startTime ? new Date(startTime) : new Date(Date.now() - 3600 * 1000);
         const end = endTime ? new Date(endTime) : new Date();
-        const res = await this.session.readHistoryValue({ nodeId }, start, end);
-        if (res.statusCode.isNotGood()) throw new Error(`History read failed: ${res.statusCode.name}`);
-        return (res.historyData?.dataValues || []).map(V.dataValueToPlain);
+        const max = Math.max(1, Math.min(1000000, Math.floor(Number(maxValues)) || 100000));
+        const details = new ReadRawModifiedDetails({
+            startTime: start, endTime: end, isReadModified: false, returnBounds: true,
+            numValuesPerNode: Math.min(10000, max) // page size: one response never has to carry the whole range
+        });
+        const lo = Math.min(start.getTime(), end.getTime()), hi = Math.max(start.getTime(), end.getTime());
+        const isBound = (dv) => {
+            const code = dv.statusCode || StatusCodes.Good;
+            const base = (code.value & 0xffff0000) >>> 0; // without the info bits, unsigned like StatusCodes values
+            if (base === StatusCodes.BadBoundNotFound.value || base === StatusCodes.BadBoundNotSupported.value) return true;
+            const t = dv.sourceTimestamp ? dv.sourceTimestamp.getTime() : NaN;
+            if (t < lo || t > hi) return true; // a stored value before the start / after the end
+            // computed for the start or end time: historian bits "Interpolated" (Part 4 7.39; node-opcua sets them
+            // without the InfoType bit, like historyReadAtTime reads them)
+            return (t === lo || t === hi) && (code.value & 0x3) === 0x2;
+        };
+        const values = [];
+        let stored = 0;
+        await this.historyReadPages(nodeId, details, (result) => {
+            for (const dv of result.historyData?.dataValues || []) {
+                const bound = isBound(dv);
+                if (!bound && stored >= max) return false;
+                if (!bound) stored++;
+                values.push(V.dataValueToPlain(dv));
+            }
+            return stored < max;
+        });
+        this.log("info", `HistoryRead raw on ${nodeId}: ${stored} value(s)${values.length > stored ? ` + ${values.length - stored} bound(s)` : ""}${stored >= max ? " (limit reached)" : ""}`);
+        return values;
+    }
+
+    // HistoryRead of one node, page by page: `onPage(result)` gets every HistoryReadResult and returns false to stop.
+    // Continuation points are followed; when the reading stops early the last one is released on the server.
+    async historyReadPages(nodeId, historyReadDetails, onPage) {
+        const request = (continuationPoint, release) => this.session.historyRead(new HistoryReadRequest({
+            historyReadDetails,
+            nodesToRead: [{ nodeId, continuationPoint }],
+            timestampsToReturn: TimestampsToReturn.Both,
+            releaseContinuationPoints: release
+        }));
+        let continuationPoint;
+        for (;;) {
+            let response;
+            try {
+                response = await request(continuationPoint, false);
+            } catch (err) {
+                // a refused service ("serviceResult = BadHistoryOperationInvalid (0x80710000)"): say it like a node result
+                const m = /serviceResult\s*=\s*(\w+)/.exec(err?.message || "");
+                throw m ? new Error(`History read failed: ${m[1]}`) : err;
+            }
+            const result = response.results?.[0];
+            if (!result) throw new Error("History read failed: the server returned no result");
+            // GoodNoData / GoodMoreData are results too (isNotGood() would mean "not exactly Good")
+            if (result.statusCode.isBad()) throw new Error(`History read failed: ${result.statusCode.name}`);
+            const wantMore = onPage(result) !== false;
+            continuationPoint = result.continuationPoint && result.continuationPoint.length ? result.continuationPoint : undefined;
+            if (!continuationPoint) return;
+            if (!wantMore) break;
+        }
+        // stopped with data left on the server: give its continuation point back
+        try { await request(continuationPoint, true); } catch (_) { /* the server frees it with the session anyway */ }
+    }
+
+    // HistoryRead with ReadAtTimeDetails: the value at each requested time (exact sample or interpolated by the server).
+    // -> [{ requested, value, dataType, statusCode, statusCodeFull, sourceTimestamp, serverTimestamp, interpolated, calculated }]
+    // in request order. Long lists are sent in requests of at most 1000 times (the usual per-call limit of servers).
+    async historyReadAtTime({ nodeId, timestamps, useSimpleBounds = true }) {
+        this.requireSession();
+        const times = (Array.isArray(timestamps) ? timestamps : []).map((t) => new Date(t));
+        if (!times.length) throw new Error("Give at least one time to read");
+        if (times.length > 10000) throw new Error(`Too many times (${times.length}); at most 10000 per read`);
+        const bad = times.findIndex((d) => Number.isNaN(d.getTime()));
+        if (bad >= 0) throw new Error(`Not a valid time: ${timestamps[bad]}`);
+        const out = [];
+        const CHUNK = 1000;
+        for (let i = 0; i < times.length; i += CHUNK) {
+            const reqTimes = times.slice(i, i + CHUNK);
+            const dvs = [];
+            await this.historyReadPages(nodeId, new ReadAtTimeDetails({ reqTimes, useSimpleBounds: !!useSimpleBounds }), (result) => {
+                dvs.push(...(result.historyData?.dataValues || []));
+            });
+            reqTimes.forEach((t, k) => {
+                const dv = dvs[k];
+                if (!dv) {
+                    out.push({ requested: t.toISOString(), value: null, dataType: "Null", statusCode: "BadNoData", statusCodeFull: "BadNoData", sourceTimestamp: null, serverTimestamp: null, interpolated: false, calculated: false });
+                    return;
+                }
+                const plain = V.dataValueToPlain(dv);
+                // historian bits 0:1 (Part 4 StatusCode info bits); a Bad result (e.g. BadDataLost inside a gap) can carry
+                // them too, but holds no value that was interpolated or calculated
+                const code = dv.statusCode ? dv.statusCode.value >>> 0 : 0;
+                const bits = code >>> 30 === 2 ? 0 : code & 0x3;
+                out.push({
+                    requested: t.toISOString(),
+                    value: plain.value,
+                    dataType: plain.dataType,
+                    statusCode: String(plain.statusCode).split("#")[0], // without the info bits ("Good", "BadNoData", ...)
+                    statusCodeFull: plain.statusCode,
+                    sourceTimestamp: plain.sourceTimestamp,
+                    serverTimestamp: plain.serverTimestamp,
+                    interpolated: bits === 0x2,
+                    calculated: bits === 0x1
+                });
+            });
+        }
+        const good = out.filter((r) => /^(Good|Uncertain)/.test(r.statusCode)).length;
+        this.log("info", `HistoryRead at ${times.length} time(s) on ${nodeId}: ${good} value(s), ${out.filter((r) => r.interpolated).length} interpolated`);
+        return out;
+    }
+
+    // HistoryRead with ReadEventDetails on an event notifier (Server object, objects, folders). An empty startTime or
+    // endTime is "not specified" (Part 11: forward from the start / backward from the end); end before start returns the
+    // newest first. Follows continuation points until `maxEvents` events, then releases the rest.
+    // -> events with the EVENT_FIELDS (plus EventTypeName), like live events.
+    async historyReadEvents({ nodeId, startTime, endTime, maxEvents = 1000 } = {}) {
+        this.requireSession();
+        const max = Math.max(1, Math.min(100000, Math.floor(Number(maxEvents)) || 1000));
+        const parse = (x, label) => {
+            if (x === undefined || x === null || x === "") return null;
+            const d = new Date(x);
+            if (Number.isNaN(d.getTime())) throw new Error(`Not a valid ${label}: ${x}`);
+            return d;
+        };
+        let start = parse(startTime, "start time");
+        let end = parse(endTime, "end time");
+        if (!start && !end) { start = new Date(0); end = new Date(Date.now() + 60e3); } // everything, oldest first
+        const details = new ReadEventDetails({
+            startTime: start || undefined, // undefined = DateTime.MinValue (not specified)
+            endTime: end || undefined,
+            numValuesPerNode: Math.min(1000, max), // page size; the same in every continuation request
+            filter: constructEventFilter(EVENT_FIELDS)
+        });
+        const lists = [];
+        await this.historyReadPages(nodeId, details, (result) => {
+            for (const list of result.historyData?.events || []) {
+                if (lists.length >= max) break;
+                lists.push(list.eventFields || []);
+            }
+            return lists.length < max;
+        });
+        const typeAt = EVENT_FIELDS.indexOf("EventType");
+        const out = [];
+        for (const fields of lists) {
+            const ev = {};
+            EVENT_FIELDS.forEach((f, i) => { ev[f] = V.variantToPlain(fields[i]); });
+            try {
+                const t = fields[typeAt]?.value;
+                if (t) ev.EventTypeName = await this.dataTypeName(t);
+            } catch (_) { /* ignore */ }
+            out.push(ev);
+        }
+        this.log("info", `HistoryRead events on ${nodeId}: ${out.length} event(s)${out.length >= max ? " (limit reached)" : ""}`);
+        return out;
     }
 
     // ---------------------------------------------------------------- certificates

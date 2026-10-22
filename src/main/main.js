@@ -398,10 +398,11 @@ function startDesktop() {
 
     // Methods the renderer may call on each engine.
     const SERVER_METHODS = ["start", "stop", "getStatus", "getLiveValues", "setValue", "setPaused", "getHistory", "raiseEvent",
-        "getAlarms", "alarmAction", "setServerState", "closeSession", "listCertificates", "certificateAction"];
+        "getAlarms", "alarmAction", "setServerState", "closeSession", "listCertificates", "certificateAction",
+        "getHistoryStats", "clearHistory", "getEventHistory", "clearEventHistory", "setHistoryLimits"];
     const CLIENT_METHODS = ["getEndpoints", "findServers", "connect", "disconnect", "browse", "readAttributes", "read", "write",
         "monitor", "unmonitor", "monitorEvents", "conditionRefresh", "conditionMethod", "getMethodInfo", "callMethod",
-        "historyRead", "setPublishingInterval", "lastRejectedServerCertificate", "trustServerCertificate"];
+        "historyRead", "historyReadAtTime", "historyReadEvents", "setPublishingInterval", "lastRejectedServerCertificate", "trustServerCertificate"];
 
     // Only the simulator's own page may use the IPC channels (not a frame or page it might ever navigate to).
     const normalizeUrl = (url) => {
@@ -837,6 +838,8 @@ function startDesktop() {
         setTimeout(() => app.exit(0), 8000);
         await settleWithin(() => clientEngine.disconnect(true), 3000);
         await settleWithin(() => serverEngine.stop(0), 3000);
+        // write the last queued history entries and close the database (also when the server was not running)
+        try { serverEngine.closeHistory(); } catch (err) { logApp("error", `History database: ${err.message}`); }
         if (logStream) logStream.end();
         app.quit();
     });

@@ -6,6 +6,7 @@ const fs = require("fs");
 const { ServerEngine, parseAdvertisedUrls, SECURE_PRESET, securityWarnings, projectScriptSummary } = require("./serverEngine");
 const { fromTemplate, readProjectFile, PROJECT_EXTENSIONS } = require("./project");
 const { DEFAULT_USERS } = require("./defaultProject");
+const { MAX_HISTORY_SIZE } = require("./historyStore");
 const { localIPv4Addresses } = require("./network");
 
 const TEMPLATES = ["demo", "empty", "load-test"];
@@ -28,7 +29,13 @@ Options (environment variable in brackets):
   --alt-hostnames <list>   Extra comma separated host names / IPs for endpoint URLs       [OPCUA_ALT_HOSTNAMES]
   --advertised-url <urls>  Extra comma separated endpoint URLs for NAT / port mapping,    [OPCUA_ADVERTISED_URL]
                            e.g. opc.tcp://192.168.1.20:48552 for docker run -p 48552:4840
-  --data-dir <dir>         Folder for certificates (PKI) and logs                         [OPCUA_DATA_DIR]
+  --data-dir <dir>         Folder for certificates (PKI), logs and history                [OPCUA_DATA_DIR]
+  --value-history-size <n> Values kept per historizing variable, 0 (off) to 1000000;     [OPCUA_VALUE_HISTORY_SIZE]
+                           the oldest are removed beyond it (default: from project, 100000)
+  --event-history-size <n> Events kept per event notifier, 0 (off) to 1000000            [OPCUA_EVENT_HISTORY_SIZE]
+                           (default: from project, 100000)
+  --clear-history          Delete all saved value and event history before starting (one-off; history is
+                           otherwise kept across restarts, up to the sizes above)
   --secure                 Apply the secure preset for organisations (no anonymous, only    [OPCUA_SECURE=1]
                            encrypted policies, no auto-accept, no discovery/LDS)
   --no-scripts             Do not run method scripts (refuse calls to methods that have one, [OPCUA_NO_SCRIPTS=1]
@@ -60,11 +67,18 @@ const VALUE_OPTIONS = {
     altHostnames: ["--alt-hostnames", "OPCUA_ALT_HOSTNAMES"],
     advertisedUrls: ["--advertised-url", "OPCUA_ADVERTISED_URL"],
     dataDir: ["--data-dir", "OPCUA_DATA_DIR"],
+    valueHistorySize: ["--value-history-size", "OPCUA_VALUE_HISTORY_SIZE"],
+    eventHistorySize: ["--event-history-size", "OPCUA_EVENT_HISTORY_SIZE"],
     listen: ["--listen", "OPCUA_LISTEN"]
+};
+// what a value option takes, added to "needs a value"
+const VALUE_HINTS = {
+    valueHistorySize: `a whole number from 0 (off) to ${MAX_HISTORY_SIZE}`,
+    eventHistorySize: `a whole number from 0 (off) to ${MAX_HISTORY_SIZE}`
 };
 // repeating these flags adds to the list instead of replacing it
 const LIST_OPTIONS = ["altHostnames", "advertisedUrls"];
-const FLAG_OPTIONS = { "--no-security": "noSecurity", "--secure": "secure", "--no-scripts": "noScripts", "--regenerate-cert": "regenerateCertForce", "--verbose": "verbose", "--help": "help", "-h": "help" };
+const FLAG_OPTIONS = { "--no-security": "noSecurity", "--secure": "secure", "--no-scripts": "noScripts", "--regenerate-cert": "regenerateCertForce", "--clear-history": "clearHistory", "--verbose": "verbose", "--help": "help", "-h": "help" };
 // accepted and ignored: the Linux launcher and Electron pass them through; --start (a desktop option)
 // is what headless mode always does, so `opcua-simulator --start` also works on a machine without display
 const NO_OP_FLAGS = ["--headless", "--no-sandbox", "--disable-gpu", "--start"];
@@ -97,6 +111,7 @@ function parseArgs(argv, env = process.env, { allowUnknown = false } = {}) {
         // the variable is usually permanent (docker compose): renew only when host names / IPs changed
         regenerateCert: parseBool(env.OPCUA_REGENERATE_CERT, "OPCUA_REGENERATE_CERT", errors),
         regenerateCertForce: false,
+        clearHistory: false, // command line only: an environment variable would clear on every container restart
         advertiseIps: env.OPCUA_ADVERTISE_IPS === undefined || String(env.OPCUA_ADVERTISE_IPS).trim() === ""
             ? undefined : parseBool(env.OPCUA_ADVERTISE_IPS, "OPCUA_ADVERTISE_IPS", errors),
         verbose: logLevel === "debug",
@@ -117,16 +132,17 @@ function parseArgs(argv, env = process.env, { allowUnknown = false } = {}) {
         if (key) {
             let value = inline;
             if (value === undefined) {
-                // "--port --no-security" must not swallow the next option
-                if (i + 1 >= argv.length || String(argv[i + 1]).startsWith("-")) {
-                    errors.push(`${flag} needs a value`);
+                // "--port --no-security" must not swallow the next option (a negative number is a value, reported
+                // with the valid range below)
+                if (i + 1 >= argv.length || (String(argv[i + 1]).startsWith("-") && !/^-\d/.test(String(argv[i + 1])))) {
+                    errors.push(`${flag} needs a value${VALUE_HINTS[key] ? ` (${VALUE_HINTS[key]})` : ""}`);
                     continue;
                 }
                 value = String(argv[++i]);
             }
             value = value.trim();
             if (!value) {
-                errors.push(`${flag} needs a value`);
+                errors.push(`${flag} needs a value${VALUE_HINTS[key] ? ` (${VALUE_HINTS[key]})` : ""}`);
                 continue;
             }
             if (LIST_OPTIONS.includes(key) && fromCommandLine.has(key)) raw[key].value += `,${value}`;
@@ -173,6 +189,13 @@ function parseArgs(argv, env = process.env, { allowUnknown = false } = {}) {
         tags = integer("tags", 1, MAX_TAGS);
         if (tags === null) errors.push(`${label("tags")} is not a valid number of tags (1-${MAX_TAGS})`);
     }
+    // history capacities: plain whole numbers (no 1k, 1e5 or 100_000), 0 = do not record
+    const historySizes = {};
+    for (const [key, what] of [["valueHistorySize", "values kept per historizing variable"], ["eventHistorySize", "events kept per event notifier"]]) {
+        if (!raw[key]) continue;
+        historySizes[key] = integer(key, 0, MAX_HISTORY_SIZE);
+        if (historySizes[key] === null) errors.push(`${label(key)} is not valid: give the number of ${what} as a whole number from 0 (off) to ${MAX_HISTORY_SIZE}`);
+    }
     if (raw.template && !TEMPLATES.includes(raw.template.value)) {
         errors.push(`${label("template")} is not a template (use ${TEMPLATES.join(", ")})`);
     }
@@ -207,6 +230,10 @@ function parseArgs(argv, env = process.env, { allowUnknown = false } = {}) {
         altHostnames: get("altHostnames"),
         advertisedUrls: get("advertisedUrls"),
         dataDir: get("dataDir"),
+        valueHistorySize: historySizes.valueHistorySize ?? null,
+        eventHistorySize: historySizes.eventHistorySize ?? null,
+        // where the capacities come from (banner): "--value-history-size" / "OPCUA_VALUE_HISTORY_SIZE"
+        historySizeFrom: { values: raw.valueHistorySize ? raw.valueHistorySize.from : null, events: raw.eventHistorySize ? raw.eventHistorySize.from : null },
         listen: get("listen") ? get("listen").toLowerCase() : null
     });
 }
@@ -304,6 +331,24 @@ function withResourcePath(url, resourcePath) {
     return hasPath ? url : url.replace(/\/$/, "") + (resourcePath || "");
 }
 
+// Where the history is saved and how much it holds (it survives restarts until --clear-history).
+function historyLine(engine, opts = {}) {
+    const h = engine.getHistoryStats();
+    // h.hint: what to do (damaged file: --clear-history; permissions: owner and mode of the file)
+    if (h.error) {
+        const what = h.inMemory ? "not saved, kept in memory for this run only" : `${h.file} cannot be used`;
+        return `History: ${what} (${h.error})${h.hint ? `\n  Hint: ${h.hint}` : ""}`;
+    }
+    const { values, events } = engine.historyLimits;
+    const from = opts.historySizeFrom || {};
+    const source = (name) => (name ? ` (${name})` : "");
+    const keeps = [
+        `${values ? `${values} values per variable` : "no values (value recording off)"}${source(from.values)}`,
+        `${events ? `${events} events per notifier` : "no events (event recording off)"}${source(from.events)}`
+    ].join(", ");
+    return `History: ${h.file} - ${h.values} values, ${h.events} events saved (keeps ${keeps}; --clear-history deletes it)`;
+}
+
 // Connect URLs, security and log-ins as the running server really offers them (not as configured).
 function bannerLines(engine, project, opts) {
     const cfg = project.server;
@@ -363,6 +408,7 @@ function bannerLines(engine, project, opts) {
         });
         lines.push(users.length ? `Users: ${users.join(", ")}` : "Users: none defined in the project, so every user name login fails");
     }
+    lines.push(historyLine(engine, opts));
     const warnings = securityWarnings(project).filter(Boolean);
     if (warnings.length) {
         lines.push("", "Security notes:");
@@ -377,7 +423,7 @@ function bannerLines(engine, project, opts) {
 }
 
 /**
- * Starts the server and keeps running until SIGINT/SIGTERM.
+ * Starts the server and keeps running until SIGINT/SIGTERM/SIGHUP.
  * `write` receives log lines; `defaultDataDir` is used when no --data-dir is given;
  * `allowUnknown` ignores unknown arguments (Electron passes Chromium switches).
  */
@@ -427,6 +473,8 @@ async function runHeadless(argv, { defaultDataDir, write = (line) => console.log
     if (opts.altHostnames) cfg.alternateHostnames = [cfg.alternateHostnames, opts.altHostnames].filter(Boolean).join(",");
     if (opts.advertisedUrls) cfg.advertisedUrls = [cfg.advertisedUrls, opts.advertisedUrls].filter(Boolean).join(",");
     if (opts.listen) cfg.listenAddress = opts.listen;
+    if (opts.valueHistorySize !== null) cfg.valueHistorySize = opts.valueHistorySize;
+    if (opts.eventHistorySize !== null) cfg.eventHistorySize = opts.eventHistorySize;
     if (opts.noSecurity) {
         cfg.securityPolicies = ["None"];
         cfg.securityModes = ["None"];
@@ -463,6 +511,14 @@ async function runHeadless(argv, { defaultDataDir, write = (line) => console.log
             return fail(`Cannot regenerate the server certificate: ${err.message}`);
         }
     }
+    if (opts.clearHistory) {
+        try {
+            const stats = engine.clearAllHistory();
+            write(`History cleared (--clear-history): ${stats.file}${stats.replaced ? " (it was damaged and has been replaced by a new, empty file)" : ""}`);
+        } catch (err) {
+            return fail(`Cannot clear the history: ${err.message}`);
+        }
+    }
     try {
         await engine.start(project, { allowScripts: !opts.noScripts });
     } catch (err) {
@@ -487,7 +543,9 @@ async function runHeadless(argv, { defaultDataDir, write = (line) => console.log
     const stop = async (signal) => {
         if (stopping) return;
         stopping = true;
-        write(`Received ${signal}, stopping server...`);
+        // after SIGHUP the terminal is gone: a failed write to it must not end the process before the history is saved
+        if (signal === "SIGHUP") for (const s of [process.stdout, process.stderr]) s.on("error", () => {});
+        try { write(`Received ${signal}, stopping server...`); } catch (_) { /* no terminal */ }
         clearInterval(healthTimer);
         try { await engine.stop(0); } catch (_) { /* ignore */ }
         logFile.end();
@@ -495,6 +553,8 @@ async function runHeadless(argv, { defaultDataDir, write = (line) => console.log
     };
     process.on("SIGINT", () => stop("SIGINT"));
     process.on("SIGTERM", () => stop("SIGTERM"));
+    // closing the terminal or the SSH session: by default SIGHUP ends the process without writing the queued history
+    process.on("SIGHUP", () => stop("SIGHUP"));
     return engine;
 }
 

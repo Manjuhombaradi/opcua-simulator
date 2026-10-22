@@ -16,6 +16,8 @@ const Help = {
         const mod = App.meta.platform === "darwin" ? "⌘" : "Ctrl"; // ⌘ only on macOS, whose fonts have it
         // an example host port that really differs from the server port
         const altPort = port + 10000 <= 65535 ? port + 10000 : port - 10000;
+        const sep = App.meta.platform === "win32" ? "\\" : "/";
+        const historyFile = App.meta.dataDir ? [App.meta.dataDir, "history", "history.db"].join(sep) : "history/history.db in the data folder";
         const section = (title, ...content) => h("div", { class: "card" }, h("div", { class: "card-head" }, h("h2", null, title)), h("div", { class: "card-body help" }, ...content));
 
         view.appendChild(h("div", { class: "stack", style: { maxWidth: "980px" } },
@@ -34,6 +36,22 @@ const Help = {
                     h("li", null, "Change values, quality (StatusCode) and timestamps in ", h("b", null, "Live Values"), "; trigger alarms in ", h("b", null, "Alarms & Events"), "."),
                     h("li", null, "Use the built-in ", h("b", null, "Client"), " to check what a client sees.")),
                 h("p", null, "Tick “Start the server automatically” in the welcome wizard or in Configuration → Startup & Network, and the simulator is serving data as soon as the application opens.")),
+
+            section("History (HistoryRead)",
+                h("p", null, "Variables with ", h("b", null, "Historizing"), " ticked (Address Space) record every value change, and the Server object and every folder / object record the events that reach them. ",
+                    "Both are saved in a database on this computer (", code(historyFile), ") and survive restarts of the server and of the application — clients can read what was recorded in earlier runs."),
+                h("ul", null,
+                    h("li", null, h("b", null, "Raw values"), " (ReadRawModifiedDetails): every stored value between a start and an end time; at most 10 000 values per node and call, the rest with continuation points."),
+                    h("li", null, h("b", null, "Values at specific times"), " (ReadAtTimeDetails): one value per requested time, in request order. A stored sample at exactly that time is returned as it is; otherwise the value is interpolated from the stored values around it — linear for numbers, stepped (the value before) for Boolean, String, DateTime and other types — and its StatusCode carries the ",
+                        code("HistorianInterpolated"), " bit. Before the first or after the last stored value: ", code("BadNoData"), ". Up to 1000 times per node and call, the rest with continuation points."),
+                    h("li", null, h("b", null, "Events"), " (ReadEventDetails) on the Server object (", code("ns=0;i=2253"), ") and on folders / objects: time range (end before start = newest first), maximum count with continuation points, and the EventFilter's select clauses and where clause (e.g. OfType, Severity ≥ 500). Their EventNotifier attribute has the HistoryRead bit."),
+                    h("li", null, "Limits in ", h("b", null, "Configuration → History"), ": values per variable and events per object — any whole number from 0 (off) to 1 000 000, e.g. 1000 (default 100 000). The oldest entries are removed first. A new limit applies at once while the server runs; a lower one deletes the oldest entries beyond it (you are asked first). Headless: ",
+                        code("--value-history-size 1000"), " / ", code("--event-history-size 1000"), "."),
+                    h("li", null, "Each server stop stores an entry without value, status ", code("BadDataLost"), ", for every historizing variable (after a crash or kill it is added at the next start). Raw reads return it as is; ReadAtTime in that gap returns ",
+                        code("BadDataLost"), " with simple bounds (nothing is interpolated across the stop), or an ", code("UncertainDataSubNormal"), " value interpolated over it without them."),
+                    h("li", null, "History is only deleted when you clear it: ", h("b", null, "Live Values"), " → history (clock) → Clear this variable's history; ", h("b", null, "Alarms & Events"), " → Event history → Clear; ",
+                        h("b", null, "Configuration → History"), " → Clear all value / event history; headless: ", code(`${headless} --clear-history`), " (clears once before the start)."),
+                    h("li", null, "Built-in ", h("b", null, "Client"), ": ", h("b", null, "History…"), " on a historizing variable (raw values or values at specific times — a list or every N seconds), ", h("b", null, "Event history…"), " on an object whose EventNotifier has the HistoryRead bit."))),
 
             section("Security",
                 h("ul", null,
@@ -68,6 +86,9 @@ const Help = {
                     h("li", null, "Serve a project saved from this app: ", code(`${headless} --project myplant.opcuasim`)),
                     h("li", null, "Load-test template: ", code(`${headless} --template load-test --tags 5000`)),
                     h("li", null, "New server certificate (e.g. the VM got a new IP): ", code(`${headless} --regenerate-cert`), "; more detail in the log: ", code("--verbose")),
+                    h("li", null, "Delete the saved value and event history before the start: ", code(`${headless} --clear-history`)),
+                    h("li", null, "History limits (0 = off, at most 1 000 000): ", code(`${headless} --value-history-size 1000 --event-history-size 1000`), ", or ",
+                        code("OPCUA_VALUE_HISTORY_SIZE"), " / ", code("OPCUA_EVENT_HISTORY_SIZE"), " (Docker: ", code("-e OPCUA_VALUE_HISTORY_SIZE=1000"), ")"),
                     h("li", null, "Behind NAT / port forwarding: ", code(`${headless} --advertised-url opc.tcp://<host-ip>:${altPort}`)),
                     h("li", null, "Docker: ", code("docker run -p 4840:4840 -e OPCUA_HOSTNAME=<host-ip> opcua-simulator"), ", or when the ports differ ",
                         code(`docker run -p ${altPort}:4840 -e OPCUA_ADVERTISED_URL=opc.tcp://<host-ip>:${altPort} opcua-simulator`), " (see README)."),

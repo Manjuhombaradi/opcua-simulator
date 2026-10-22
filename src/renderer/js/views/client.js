@@ -291,7 +291,9 @@ const ClientView = {
                 isVar ? h("button", { class: "btn small", onclick: () => this.monitorDialog(ref) }, "Monitor…") : null,
                 isVar && data.info.historizing ? h("button", { class: "btn small", onclick: () => this.historyDialog(ref) }, icon("clock"), "History…") : null,
                 isMethod ? h("button", { class: "btn small primary", onclick: () => this.callDialog(ref) }, "ƒ Call…") : null,
-                eventNotifier && /SubscribeToEvents/.test(eventNotifier.value) ? h("button", { class: "btn small", onclick: () => attempt(() => api.client("monitorEvents", ref.nodeId), `Subscribed to events of ${ref.displayName}`) }, "Subscribe events") : null)));
+                eventNotifier && /SubscribeToEvents/.test(eventNotifier.value) ? h("button", { class: "btn small", onclick: () => attempt(() => api.client("monitorEvents", ref.nodeId), `Subscribed to events of ${ref.displayName}`) }, "Subscribe events") : null,
+                // EventNotifier bit 2 (value 4): the node keeps an event history that HistoryRead (ReadEventDetails) can read
+                (data.info.eventNotifier || 0) & 4 ? h("button", { class: "btn small", onclick: () => this.eventHistoryDialog(ref) }, icon("clock"), "Event history…") : null)));
         if (data.value) {
             const v = data.value;
             el.appendChild(h("div", { class: "card", style: { marginBottom: "12px", boxShadow: "none" } }, h("div", { class: "card-body" },
@@ -543,30 +545,156 @@ const ClientView = {
         });
     },
 
+    // HistoryRead of a historizing variable: raw values (ReadRawModifiedDetails) or the values at chosen times
+    // (ReadAtTimeDetails, exact samples or interpolated by the server).
     async historyDialog(ref) {
-        const start = h("input", { type: "datetime-local", step: "1", value: toLocalInput(Date.now() - 3600e3).slice(0, 19) });
-        const end = h("input", { type: "datetime-local", step: "1", value: toLocalInput(Date.now() + 60e3).slice(0, 19) });
-        const chartHost = h("div");
+        const now = Date.now();
+        const local = (ms) => toLocalInput(ms).slice(0, 19);
+        const mode = select([{ value: "raw", label: "Raw values" }, { value: "attime", label: "Values at specific times" }], this.historyMode || "raw");
+        const start = h("input", { type: "datetime-local", step: "1", value: local(now - 3600e3) });
+        const end = h("input", { type: "datetime-local", step: "1", value: local(now + 60e3) });
+        const timesHow = select([{ value: "every", label: "Every N seconds from start to end" }, { value: "list", label: "List of times (one per line)" }], "every");
+        const atStart = h("input", { type: "datetime-local", step: "1", value: local(Math.floor((now - 300e3) / 1000) * 1000) });
+        const atEnd = h("input", { type: "datetime-local", step: "1", value: local(Math.floor(now / 1000) * 1000) });
+        const every = h("input", { type: "number", min: 0.001, step: "any", value: 10, style: { width: "110px" } });
+        const list = h("textarea", { rows: 6, spellcheck: "false", value: [60, 45, 30, 15, 5].map((s) => fmtTime(Math.floor((now - s * 1000) / 1000) * 1000, true)).join("\n") });
+        const simple = checkbox("Use simple bounds", true);
+        const count = h("span", { class: "muted small", style: { alignSelf: "flex-end", paddingBottom: "8px" } });
+        const everyPanel = h("div", { class: "row wrap" }, field("Start", atStart), field("End", atEnd), field("Every (seconds)", every), count);
+        const listPanel = field("Times", list, "One per line: 2026-10-22 14:05:30.250 (local time), an ISO time with Z or offset, 14:05:30 (today), or relative to now: -30s, -5m, -2h.");
+        const rawPanel = h("div", { class: "row wrap" }, field("Start", start), field("End", end));
+        const atPanel = h("div", { class: "stack", style: { gap: "10px" } },
+            h("div", { class: "row wrap" }, field("Times", timesHow), h("div", { style: { alignSelf: "flex-end", paddingBottom: "6px" }, title: "UseSimpleBounds of ReadAtTimeDetails: the server interpolates from the nearest stored values around each time" }, simple)),
+            everyPanel, listPanel);
+        const chartHost = h("div", { style: { marginTop: "10px" } });
         const out = h("div");
         let chart = null;
-        const load = async () => {
+
+        const generated = () => {
+            const a = new Date(atStart.value).getTime();
+            const b = new Date(atEnd.value).getTime();
+            const step = Number(every.value) * 1000;
+            if (!isFinite(a) || !isFinite(b)) throw new Error("Enter a start and an end time");
+            if (!(step > 0)) throw new Error("Enter an interval greater than 0 seconds");
+            if (b < a) throw new Error("The end time is before the start time");
+            const n = Math.floor((b - a) / step + 1e-9) + 1;
+            if (n > MAX_AT_TIMES) throw new Error(`That is ${n.toLocaleString()} times; at most ${MAX_AT_TIMES.toLocaleString()} per read (choose a longer interval or a shorter range)`);
+            return Array.from({ length: n }, (_, i) => new Date(a + i * step).toISOString());
+        };
+        const times = () => (timesHow.value === "every" ? generated() : parseTimeList(list.value));
+        const updateCount = () => {
+            try { count.textContent = `→ ${plural(generated().length, "time")}`; count.style.color = ""; } catch (err) { count.textContent = err.message; count.style.color = "var(--bad)"; }
+        };
+        [atStart, atEnd, every].forEach((el) => el.addEventListener("input", updateCount));
+        const showMode = () => {
+            this.historyMode = mode.value;
+            rawPanel.classList.toggle("hidden", mode.value !== "raw");
+            atPanel.classList.toggle("hidden", mode.value !== "attime");
+            everyPanel.classList.toggle("hidden", timesHow.value !== "every");
+            listPanel.classList.toggle("hidden", timesHow.value !== "list");
+            updateCount();
+        };
+        mode.addEventListener("change", () => { clear(out); chart?.clearSeries(); showMode(); });
+        timesHow.addEventListener("change", showMode);
+        showMode();
+
+        const loadRaw = async () => {
             const values = await attempt(() => api.client("historyRead", { nodeId: ref.nodeId, startTime: new Date(start.value).toISOString(), endTime: new Date(end.value).toISOString() }));
-            if (!values) return false;
+            if (!values) return;
             if (!chart) chart = new TrendChart(chartHost);
-            chart.setPoints("h", ref.displayName, values.map((d) => [d.sourceTimestamp, Array.isArray(d.value) ? d.value[0] : d.value]));
-            clear(out).appendChild(h("div", { class: "muted small", style: { margin: "8px 0" } }, `${values.length} value(s) returned by HistoryRead (ReadRawModifiedDetails)`));
+            chart.clearSeries();
+            // a stop marker of the simulator (BadDataLost without value) breaks the line
+            chart.setPoints("h", ref.displayName, values.map((d) => [d.sourceTimestamp, isHistoryGap(d) ? null : Array.isArray(d.value) ? d.value[0] : d.value]));
+            // bounding values (start / end time: interpolated or BadBoundNotFound) are not stored values
+            const bounds = values.filter((d) => /^BadBound|#HistorianInterpolated/.test(d.statusCode)).length;
+            const stored = values.length - bounds;
+            clear(out).appendChild(h("div", { class: "muted small", style: { margin: "8px 0" } },
+                `${stored.toLocaleString()} value(s)${bounds ? ` and ${plural(bounds, "bounding value")}` : ""} returned by HistoryRead (ReadRawModifiedDetails)`,
+                stored >= RAW_READ_MAX ? ` · limit of ${RAW_READ_MAX.toLocaleString()} values reached, choose a shorter range for the rest` : "",
+                values.length > 500 ? " · the table shows the latest 500" : ""));
             out.appendChild(h("div", { class: "table-wrap", style: { maxHeight: "260px" } }, h("table", null,
                 h("thead", null, h("tr", null, h("th", null, "Source timestamp"), h("th", null, "Value"), h("th", null, "Status"))),
-                h("tbody", null, values.slice(-500).reverse().map((d) => h("tr", null, h("td", { class: "mono small" }, fmtTime(d.sourceTimestamp, true)), h("td", { class: "value" }, fmtValue(d.value)), h("td", null, statusBadge(d.statusCode))))))));
+                h("tbody", null, values.slice(-500).reverse().map((d) => h("tr", null, h("td", { class: "mono small" }, fmtTime(d.sourceTimestamp, true)), h("td", { class: "value" }, historyValueCell(d)), h("td", null, statusBadge(d.statusCode))))))));
+        };
+        const loadAtTime = async () => {
+            let timestamps;
+            try { timestamps = times(); } catch (err) { toast(err.message, "error"); return; }
+            const rows = await attempt(() => api.client("historyReadAtTime", { nodeId: ref.nodeId, timestamps, useSimpleBounds: simple.querySelector("input").checked }));
+            if (!rows) return;
+            const usable = rows.filter((r) => !/^Bad/.test(r.statusCode));
+            const interpolated = usable.filter((r) => r.interpolated).length;
+            if (!chart) chart = new TrendChart(chartHost);
+            chart.clearSeries();
+            // a time without data (Bad, e.g. BadDataLost while the server was stopped) breaks the line
+            chart.setPoints("t", `${ref.displayName} (● stored sample, ○ interpolated)`, rows.map((r) => [r.requested, /^Bad/.test(r.statusCode) ? null : Array.isArray(r.value) ? r.value[0] : r.value, r.interpolated]));
+            clear(out).appendChild(h("div", { class: "muted small", style: { margin: "8px 0" } },
+                `${plural(rows.length, "time")} read with HistoryRead (ReadAtTimeDetails): ${usable.length - interpolated} stored sample(s), ${interpolated} interpolated, ${rows.length - usable.length} without data`,
+                rows.length > 2000 ? " · the table shows the first 2000" : ""));
+            out.appendChild(h("div", { class: "table-wrap", style: { maxHeight: "260px" } }, h("table", null,
+                h("thead", null, h("tr", null, ["Requested time", "Value", "Status", "Source timestamp"].map((x) => h("th", null, x)))),
+                h("tbody", null, rows.slice(0, 2000).map((r) => h("tr", null,
+                    h("td", { class: "mono small" }, fmtTime(r.requested, true)),
+                    h("td", { class: "value", title: fmtValue(r.value) }, /^Bad/.test(r.statusCode) ? h("span", { class: "muted" }, "—") : fmtValue(r.value)),
+                    h("td", null, h("div", { class: "btn-group", style: { gap: "4px" } }, statusBadge(r.statusCode),
+                        // only a Good / Uncertain value was interpolated or calculated (a Bad result can carry the bits too)
+                        r.interpolated && !/^Bad/.test(r.statusCode) ? h("span", { class: "badge info", title: "HistorianInterpolated: the server computed this value from the stored values around the requested time" }, "interpolated") : null,
+                        r.calculated && !/^Bad/.test(r.statusCode) ? h("span", { class: "badge info" }, "calculated") : null)),
+                    h("td", { class: "mono small" }, fmtTime(r.sourceTimestamp, true))))))));
+        };
+        const load = async () => {
+            await (mode.value === "raw" ? loadRaw() : loadAtTime());
+            return false;
+        };
+        if (mode.value === "raw") setTimeout(load, 50);
+        await modal({
+            title: `HistoryRead · ${ref.displayName}`,
+            wide: true,
+            body: h("div", { class: "stack", style: { gap: "12px" } }, h("div", { class: "row wrap" }, field("Read", mode)), rawPanel, atPanel, h("div", null, chartHost, out)),
+            buttons: [{ label: "Read", class: "primary", onClick: load }, { label: "Close", value: null }]
+        });
+        if (chart) chart.destroy();
+    },
+
+    // HistoryRead with ReadEventDetails on an event notifier whose EventNotifier attribute has the HistoryRead bit.
+    async eventHistoryDialog(ref) {
+        const now = Date.now();
+        const local = (ms) => toLocalInput(ms).slice(0, 19);
+        const start = h("input", { type: "datetime-local", step: "1", value: local(now - 24 * 3600e3) });
+        const end = h("input", { type: "datetime-local", step: "1", value: local(now + 60e3) });
+        const order = select([{ value: "reverse", label: "Newest first" }, { value: "forward", label: "Oldest first" }], "reverse");
+        const max = h("input", { type: "number", min: 1, max: 100000, value: 1000, style: { width: "110px" } });
+        const out = h("div");
+        const load = async () => {
+            const iso = (el) => (el.value ? new Date(el.value).toISOString() : null);
+            let a = iso(start), b = iso(end);
+            if (a && b && a > b) [a, b] = [b, a];
+            // Part 11: start after end reads backwards (newest first); an empty start or end is an open-ended read
+            const range = a && b && order.value === "reverse" ? { startTime: b, endTime: a } : { startTime: a, endTime: b };
+            const limit = Math.max(1, Math.min(100000, Math.floor(Number(max.value)) || 1000));
+            const events = await attempt(() => api.client("historyReadEvents", { nodeId: ref.nodeId, ...range, maxEvents: limit }));
+            if (!events) return false;
+            clear(out).appendChild(h("div", { class: "muted small", style: { margin: "8px 0" } },
+                `${events.length.toLocaleString()} event(s) returned by HistoryRead (ReadEventDetails)`,
+                events.length >= limit ? ` · limit of ${limit.toLocaleString()} reached, there may be more` : "",
+                events.length > 2000 ? " · the table shows the first 2000" : ""));
+            if (!events.length) {
+                out.appendChild(h("div", { class: "empty" }, "No events in this time range"));
+                return false;
+            }
+            out.appendChild(h("div", { class: "table-wrap", style: { maxHeight: "380px" } }, eventHistoryTable(events.slice(0, 2000).map((e) => ({
+                time: e.Time, eventType: e.EventTypeName || e.EventType, sourceName: e.SourceName, severity: e.Severity, message: e.Message, conditionName: e.ConditionName
+            })))));
             return false;
         };
         setTimeout(load, 50);
         await modal({
-            title: `HistoryRead · ${ref.displayName}`,
+            title: `Event history · ${ref.displayName}`,
             wide: true,
-            body: h("div", null, h("div", { class: "row" }, field("Start", start), field("End", end)), chartHost, out),
+            body: h("div", { class: "stack", style: { gap: "10px" } },
+                h("div", { class: "row wrap" }, field("Start", start), field("End", end), field("Order", order), field("Max events", max)),
+                h("div", { class: "hint" }, "Leave Start or End empty for an open-ended read (forward from Start, or backward from End). The client follows continuation points until Max events, then releases the rest."),
+                out),
             buttons: [{ label: "Read", class: "primary", onClick: load }, { label: "Close", value: null }]
         });
-        if (chart) chart.destroy();
     }
 };

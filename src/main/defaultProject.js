@@ -82,6 +82,10 @@ function createDefaultProject() {
             maxConnectionsPerEndpoint: 100,
             minSupportedSampleRate: 100,
             isAuditing: false,
+            // history saved in <data folder>/history/history.db (survives restarts, cleared only on request):
+            // values kept per historizing variable and events per event notifier (0 = not recorded, at most 1 000 000)
+            valueHistorySize: 100000,
+            eventHistorySize: 100000,
             companionNodesets: [],
             customNodesetFiles: [],
             registerToLds: false,
