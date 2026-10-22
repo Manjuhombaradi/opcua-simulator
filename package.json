@@ -1,0 +1,179 @@
+{
+  "name": "opcua-simulator",
+  "productName": "OPC UA Simulator",
+  "desktopName": "opcua-simulator.desktop",
+  "version": "1.0.0",
+  "description": "Desktop OPC UA server simulator with built-in client for testing OPC UA applications",
+  "main": "src/main/main.js",
+  "engines": {
+    "node": ">=22.13"
+  },
+  "scripts": {
+    "start": "node scripts/launch.js",
+    "headless": "node src/cli.js",
+    "dist": "electron-builder",
+    "dist:mac": "electron-builder --mac",
+    "dist:win": "electron-builder --win",
+    "dist:linux": "electron-builder --linux",
+    "dist:all": "electron-builder --mac --win --linux",
+    "docker:build": "docker build -t opcua-simulator ."
+  },
+  "build": {
+    "appId": "com.opcua.simulator",
+    "productName": "OPC UA Simulator",
+    "artifactName": "OPCUA-Simulator-${version}-${os}-${arch}.${ext}",
+    "directories": {
+      "buildResources": "build",
+      "output": "dist"
+    },
+    "files": [
+      "src/**/*",
+      "package.json"
+    ],
+    "afterPack": "./build/afterPack.js",
+    "toolsets": {
+      "appimage": "1.0.3"
+    },
+    "fileAssociations": [
+      {
+        "ext": "opcuasim",
+        "name": "OPC UA Simulator Project",
+        "description": "OPC UA Simulator project",
+        "mimeType": "application/x-opcuasim",
+        "role": "Editor"
+      }
+    ],
+    "mac": {
+      "category": "public.app-category.developer-tools",
+      "target": [
+        {
+          "target": "dmg",
+          "arch": [
+            "arm64",
+            "x64"
+          ]
+        },
+        {
+          "target": "zip",
+          "arch": [
+            "arm64",
+            "x64"
+          ]
+        }
+      ],
+      "identity": "-",
+      "hardenedRuntime": false
+    },
+    "dmg": {
+      "title": "OPC UA Simulator ${version}",
+      "contents": [
+        {
+          "x": 130,
+          "y": 220,
+          "type": "file"
+        },
+        {
+          "x": 410,
+          "y": 220,
+          "type": "link",
+          "path": "/Applications"
+        },
+        {
+          "x": 270,
+          "y": 80,
+          "type": "file",
+          "path": "build/mac/Read Me First.txt"
+        }
+      ]
+    },
+    "win": {
+      "target": [
+        {
+          "target": "nsis",
+          "arch": [
+            "x64"
+          ]
+        },
+        {
+          "target": "portable",
+          "arch": [
+            "x64"
+          ]
+        }
+      ]
+    },
+    "nsis": {
+      "oneClick": true,
+      "perMachine": false,
+      "runAfterFinish": true,
+      "createDesktopShortcut": "always",
+      "createStartMenuShortcut": true,
+      "shortcutName": "OPC UA Simulator",
+      "artifactName": "OPCUA-Simulator-Setup-${version}-${arch}.${ext}"
+    },
+    "portable": {
+      "artifactName": "OPCUA-Simulator-Portable-${version}-${arch}.${ext}"
+    },
+    "linux": {
+      "target": [
+        {
+          "target": "AppImage",
+          "arch": [
+            "x64",
+            "arm64"
+          ]
+        },
+        {
+          "target": "deb",
+          "arch": [
+            "x64",
+            "arm64"
+          ]
+        },
+        {
+          "target": "tar.gz",
+          "arch": [
+            "x64",
+            "arm64"
+          ]
+        }
+      ],
+      "executableName": "opcua-simulator",
+      "category": "Development",
+      "synopsis": "OPC UA server simulator and test client",
+      "description": "Desktop OPC UA server simulator with a built-in client for testing OPC UA applications.",
+      "maintainer": "OPC UA Simulator <noreply@opcua-simulator.local>"
+    },
+    "deb": {
+      "depends": [
+        "libgtk-3-0",
+        "libnotify4",
+        "libnss3",
+        "libxss1",
+        "libxtst6",
+        "xdg-utils",
+        "libatspi2.0-0",
+        "libuuid1",
+        "libsecret-1-0",
+        "libasound2t64 | libasound2",
+        "libgbm1",
+        "libx11-xcb1"
+      ],
+      "appArmorProfile": "build/linux/apparmor-profile.tpl"
+    }
+  },
+  "license": "MIT",
+  "dependencies": {
+    "node-opcua": "^2.187.12",
+    "node-opcua-crypto": "^6.2.3"
+  },
+  "devDependencies": {
+    "electron": "^45.0.0",
+    "electron-builder": "^26.15.3"
+  },
+  "author": {
+    "name": "OPC UA Simulator",
+    "email": "noreply@opcua-simulator.local"
+  },
+  "homepage": "https://reference.opcfoundation.org/"
+}

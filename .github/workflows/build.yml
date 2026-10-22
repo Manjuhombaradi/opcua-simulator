@@ -1,0 +1,92 @@
+# Builds the installers natively on each OS. Push a tag like v1.0.0 to attach them to a GitHub release.
+name: Build installers
+
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+
+jobs:
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: windows-latest
+            target: --win
+          - os: ubuntu-latest
+            target: --linux
+          - os: macos-latest
+            target: --mac
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - run: npm ci
+      - name: Build
+        run: npx electron-builder ${{ matrix.target }} --publish never
+        env:
+          CSC_IDENTITY_AUTO_DISCOVERY: "false"
+      # the Linux packages start through the launcher script written by build/afterPack.js
+      - name: Smoke test the Linux launcher (headless, no display)
+        if: matrix.os == 'ubuntu-latest'
+        run: |
+          test -x dist/linux-unpacked/opcua-simulator.bin
+          head -c 2 dist/linux-unpacked/opcua-simulator | grep -q '#!'
+          env -u DISPLAY -u WAYLAND_DISPLAY dist/linux-unpacked/opcua-simulator --headless --help
+      - uses: actions/upload-artifact@v4
+        with:
+          name: installers-${{ matrix.os }}
+          path: |
+            dist/*.exe
+            dist/*.dmg
+            dist/*.zip
+            dist/*.AppImage
+            dist/*.deb
+            dist/*.tar.gz
+          if-no-files-found: error
+
+  release:
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+          merge-multiple: true
+      - uses: softprops/action-gh-release@v2
+        with:
+          files: artifacts/*
+          body: |
+            ## Which file do I need?
+
+            | System | File |
+            |---|---|
+            | Windows 10/11 | `OPCUA-Simulator-Setup-…-x64.exe` (installer) or `OPCUA-Simulator-Portable-…-x64.exe` (no installation) |
+            | macOS, Apple silicon (M1 and newer) | `OPCUA-Simulator-…-mac-arm64.dmg` |
+            | macOS, Intel | `OPCUA-Simulator-…-mac-x64.dmg` |
+            | Debian / Ubuntu, desktop or server | `OPCUA-Simulator-…-linux-amd64.deb` (x64) or `…-linux-arm64.deb` (ARM) |
+            | Any Linux | `…-linux-x86_64.AppImage` / `…-linux-arm64.AppImage`, or the `.tar.gz` |
+            | Docker / headless servers | build the image from the source code: `docker compose up -d` |
+
+            ## First start
+
+            These builds are not signed with a paid code-signing certificate, so the system asks once before the first start.
+
+            **macOS** – drag the app to Applications and open it. When macOS says *"OPC UA Simulator" Not Opened*, click **Done**, then open **System Settings → Privacy & Security**, scroll down and click **Open Anyway** (confirm with your password). Or run once in Terminal:
+            ```
+            xattr -dr com.apple.quarantine "/Applications/OPC UA Simulator.app"
+            ```
+
+            **Windows** – when SmartScreen shows *"Windows protected your PC"*, click **More info → Run anyway** (installer and portable .exe).
+
+            **Linux (.deb)** – `sudo apt install ./OPCUA-Simulator-*-linux-amd64.deb`, then start *OPC UA Simulator* from the app menu or run `opcua-simulator`.
+            On a server or over SSH run `opcua-simulator --headless` (it also switches to headless mode by itself when there is no display); `opcua-simulator --headless --help` lists the options.
+
+            **Linux (AppImage / .tar.gz)** – `chmod +x OPCUA-Simulator-*.AppImage && ./OPCUA-Simulator-*.AppImage` (add `--headless` on servers), or extract the `.tar.gz` and run `./opcua-simulator`. If system libraries are missing (minimal server images), the launcher prints the exact `apt` / `dnf` command to install them.
