@@ -219,13 +219,24 @@ function redirectFusesToBinary(packager, binName) {
 /**
  * macOS: the .dmg / .zip contain only the .app, while electron-builder leaves Electron's licence notices
  * next to it. Copy them into the app (Contents/Resources), as Windows and Linux builds already ship them.
+ * LICENSES.chromium.html is in node_modules/electron/dist, which exists only once Electron's binary was
+ * downloaded (npm start does that; CI installs with --ignore-scripts): if it is missing, Electron's own
+ * installer downloads it (checked against the checksums in the electron package).
  */
 function addMacLicenceNotices(context) {
     const resources = path.join(context.appOutDir, `${context.packager.appInfo.productFilename}.app`, "Contents", "Resources");
-    const electronDist = path.join(__dirname, "..", "node_modules", "electron", "dist");
-    for (const [from, to] of [["LICENSE", "LICENSE.electron.txt"], ["LICENSES.chromium.html", "LICENSES.chromium.html"]]) {
-        const source = [path.join(context.appOutDir, from), path.join(electronDist, from)].find((file) => fs.existsSync(file));
-        if (!source) throw new Error(`afterPack: Electron licence notice ${from} not found in ${context.appOutDir}`);
+    const electronDir = path.dirname(require.resolve("electron/package.json"));
+    const electronDist = path.join(electronDir, "dist");
+    const notices = [["LICENSE", "LICENSE.electron.txt"], ["LICENSES.chromium.html", "LICENSES.chromium.html"]];
+    const find = (from) => [path.join(context.appOutDir, from), path.join(electronDist, from)].find((file) => fs.existsSync(file));
+    if (!notices.every(([from]) => find(from))) {
+        console.log("  • afterPack: downloading Electron's binary once for its licence notices (node_modules/electron/install.js)");
+        const result = require("child_process").spawnSync(process.execPath, [path.join(electronDir, "install.js")], { stdio: "inherit" });
+        if (result.status !== 0) throw new Error("afterPack: could not download Electron for its licence notices (node node_modules/electron/install.js)");
+    }
+    for (const [from, to] of notices) {
+        const source = find(from);
+        if (!source) throw new Error(`afterPack: Electron licence notice ${from} not found in ${context.appOutDir} or ${electronDist}`);
         fs.copyFileSync(source, path.join(resources, to));
     }
     console.log(`  • afterPack: added Electron / Chromium licence notices to ${resources}`);
