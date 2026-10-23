@@ -7,6 +7,11 @@ desktop, and in Docker.
 
 **Download:** [latest release](https://github.com/Manjuhombaradi/opcua-simulator/releases/latest) (Windows, macOS, Linux installers) · [source](https://github.com/Manjuhombaradi/opcua-simulator) · [security notes](SECURITY.md)
 
+> **macOS says *“Apple could not verify “OPC UA Simulator.app” is free of malware…”*?** The installers are not signed with a paid
+> Apple certificate yet, so macOS shows this for every download. Click **Done**, open **System Settings → Privacy & Security**,
+> scroll down and click **Open Anyway** (once). Windows shows *“Windows protected your PC”*: **More info → Run anyway**.
+> [Details and how to check the download first](#first-launch-of-the-unsigned-builds).
+
 **Author:** Manjunagouda Hombaradi ([manjuhombaradi@gmail.com](mailto:manjuhombaradi@gmail.com))
 
 The app makes no network connections of its own (no telemetry, update checks or downloads). For use in
@@ -39,7 +44,8 @@ on macOS, `Get-FileHash <file>` on Windows) and a build-provenance attestation
 [SECURITY.md](SECURITY.md#unsigned-builds-and-how-to-verify-them).
 
 - **Windows SmartScreen** ("Windows protected your PC"): click **More info**, then **Run anyway**.
-- **macOS** ("cannot be opened" / "Not Opened"): open **System Settings → Privacy & Security** and click **Open Anyway**.
+- **macOS** (*"Apple could not verify "OPC UA Simulator.app" is free of malware…"*, or "Not Opened" on older versions):
+  click **Done**, open **System Settings → Privacy & Security**, scroll down and click **Open Anyway**.
   Or run `xattr -dr com.apple.quarantine "/Applications/OPC UA Simulator.app"` once.
 - **Linux**: nothing to do. The packages include a launcher that handles root logins and VMs without a
   display automatically, and keeps Chromium's sandbox on wherever the system allows it

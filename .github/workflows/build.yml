@@ -170,6 +170,9 @@ jobs:
           TAG: ${{ github.ref_name }}
         run: |
           cat > notes.md <<'EOF'
+          > **macOS: "Apple could not verify “OPC UA Simulator.app” is free of malware"** – expected: the app is not signed with a paid Apple certificate yet.
+          > Click **Done**, then **System Settings → Privacy & Security → Open Anyway** (once). Windows: SmartScreen → **More info → Run anyway**. Details under *First start* below.
+
           ## Which file do I need?
 
           | System | File |
@@ -199,7 +202,7 @@ jobs:
 
           Because the builds are unsigned, the system asks once before the first start.
 
-          **macOS** – drag the app to Applications and open it. When macOS says *"OPC UA Simulator" Not Opened*, click **Done**, then open **System Settings → Privacy & Security**, scroll down and click **Open Anyway** (confirm with your password). Or run once in Terminal:
+          **macOS** – drag the app to Applications and open it. When macOS says *"Apple could not verify “OPC UA Simulator.app” is free of malware…"* (older versions: *"OPC UA Simulator" Not Opened*), click **Done**, then open **System Settings → Privacy & Security**, scroll down and click **Open Anyway** (confirm with your password). Or run once in Terminal:
           ```
           xattr -dr com.apple.quarantine "/Applications/OPC UA Simulator.app"
           ```
