@@ -252,6 +252,7 @@ td.actions { text-align: right; white-space: nowrap; }
 hr.sep { border: 0; border-top: 1px solid var(--border); margin: 14px 0; }
 ::-webkit-scrollbar { width: 10px; height: 10px; }
 ::-webkit-scrollbar-thumb { background: var(--border-strong); border-radius: 5px; border: 2px solid var(--bg); }
+::-webkit-scrollbar-corner { background: transparent; }
 
 .topbar-sep { width: 1px; height: 24px; background: var(--border); margin: 0 4px; }
 
