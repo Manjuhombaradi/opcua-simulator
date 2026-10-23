@@ -142,6 +142,12 @@ class TrendChart {
             ctx.fillText(label, Math.max(half + 2, Math.min(W - half - 2, x(t))), H - 6);
         }
 
+        // lines stay inside the plot area: live charts also draw the points up to 5 s before its left edge
+        // (so the line does not start abruptly), which would otherwise run over the value labels
+        ctx.save();
+        ctx.beginPath();
+        ctx.rect(pad.l - 3, pad.t - 4, W - pad.l - pad.r + 7, H - pad.t - pad.b + 8);
+        ctx.clip();
         for (const s of this.series.values()) {
             const pts = s.points.filter((p) => p[0] >= tMin - 5000);
             if (!pts.length) continue;
@@ -188,6 +194,7 @@ class TrendChart {
                 }
             }
         }
+        ctx.restore();
         if (!all.length) {
             ctx.fillStyle = textColor;
             ctx.textAlign = "center";
