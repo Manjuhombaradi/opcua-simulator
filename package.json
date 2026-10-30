@@ -175,7 +175,7 @@
   "license": "MIT",
   "dependencies": {
     "@jitl/quickjs-wasmfile-release-sync": "^0.32.0",
-    "node-opcua": "^2.187.12",
+    "node-opcua": "^2.187.16",
     "node-opcua-crypto": "^6.2.3",
     "quickjs-emscripten-core": "^0.32.0"
   },
