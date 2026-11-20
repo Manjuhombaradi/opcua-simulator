@@ -11,7 +11,7 @@
 # image when Node.js publishes a security release.
 
 # ---- stage 1: install the production dependencies (the build tools stay in this stage)
-FROM node:22-bookworm-slim@sha256:de170b39439eb0e5a3444ad7d60b015614a381e10fecae2e30ec9e735122f38d AS deps
+FROM node:22-bookworm-slim@sha256:e9f565d32859f0cbfb52125eafe8be39390f24dac302dc3cdf566e8ba3ab21ee AS deps
 WORKDIR /app
 COPY package.json package-lock.json ./
 # Exactly the versions in package-lock.json, no install scripts. Electron and the packaging tools are
@@ -19,7 +19,7 @@ COPY package.json package-lock.json ./
 RUN npm ci --omit=dev --ignore-scripts --no-audit --no-fund
 
 # ---- stage 2: runtime image
-FROM node:22-bookworm-slim@sha256:de170b39439eb0e5a3444ad7d60b015614a381e10fecae2e30ec9e735122f38d
+FROM node:22-bookworm-slim@sha256:e9f565d32859f0cbfb52125eafe8be39390f24dac302dc3cdf566e8ba3ab21ee
 LABEL org.opencontainers.image.authors="Manjunagouda Hombaradi <manjuhombaradi@gmail.com>"
 
 # npm, npx, corepack and yarn are not needed to run the simulator: remove them (less to attack, fewer
